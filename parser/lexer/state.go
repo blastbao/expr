@@ -8,15 +8,26 @@ import (
 
 type stateFn func(*lexer) stateFn
 
+// root 逐字符扫描源代码，并根据字符的含义进入不同状态函数或直接生成 Token 。
+// stateFn 是函数类型，表示下一个状态。可以返回自身（root）、另一个状态函数（如 number）、或 nil（表示终止扫描）。
 func root(l *lexer) stateFn {
+	// 读取一个字符（rune）
 	switch r := l.next(); {
 	case r == eof:
+		// 如果读到 eof（-1），说明已经扫描完毕。
+		// 调用 emitEOF() 生成一个 EOF Token，返回 nil 表示扫描终止。
 		l.emitEOF()
 		return nil
 	case utils.IsSpace(r):
+		// 如果是空格、制表符等跳过字符，调用 skip() 跳过所有空白字符。
+		// 继续保持在 root 状态。
 		l.skip()
 		return root
 	case r == '\'' || r == '"':
+		// 如果是 ' 或 "，说明是一个转义字符串。
+		//	- scanString(r)：扫描字符串直到闭合引号。
+		//	- unescape(...)：将转义字符（如 \n）转换为实际字符。
+		// 生成 String 类型的 Token。
 		l.scanString(r)
 		str, err := unescape(l.word())
 		if err != nil {
@@ -24,8 +35,12 @@ func root(l *lexer) stateFn {
 		}
 		l.emitValue(String, str)
 	case r == '`':
+		// 如果是反引号（Go 风格），就是原始字符串。
+		// 不处理转义字符，原样提取内容。
 		l.scanRawString(r)
 	case '0' <= r && r <= '9':
+		// 遇到数字，进入 number 状态。
+		// 先 backup() 回退当前字符，留给 number 状态函数完整处理整个数字。
 		l.backup()
 		return number
 	case r == '?':
@@ -50,9 +65,15 @@ func root(l *lexer) stateFn {
 		l.accept("&=*")
 		l.emit(Operator)
 	case r == '.':
+		// . 有可能是：
+		//	- 小数点（3.14）→ 属于数字
+		//	- 范围运算符（1..5）
+		//	- 属性访问（a.b）
+		// 所以回退一个字符，让 dot 状态来进一步判断。
 		l.backup()
 		return dot
 	case utils.IsAlphaNumeric(r):
+		// 如果是字母或数字（开头必须是字母），则回退一个字符，进入 identifier 状态，去识别变量名、关键字等。
 		l.backup()
 		return identifier
 	default:
