@@ -64,11 +64,12 @@ func (l *lexer) emit(t Kind) {
 	l.emitValue(t, l.word())
 }
 
+// 构造一个 Token 实例，并追加到 l.tokens 切片中。
 func (l *lexer) emitValue(t Kind, value string) {
 	l.tokens = append(l.tokens, Token{
-		Location: file.Location{From: l.start, To: l.end},
-		Kind:     t,
-		Value:    value,
+		Location: file.Location{From: l.start, To: l.end}, // 记录 token 在源码中的位置，用于错误定位、调试
+		Kind:     t,                                       // 标识 token 类型
+		Value:    value,                                   // 存储真正的 token 字符串
 	})
 	l.commit()
 }
@@ -82,6 +83,7 @@ func (l *lexer) emitEOF() {
 	if to < 0 {
 		to = 0
 	}
+
 	l.tokens = append(l.tokens, Token{
 		Location: file.Location{From: from, To: to},
 		Kind:     EOF,
@@ -95,9 +97,11 @@ func (l *lexer) skip() {
 
 func (l *lexer) word() string {
 	// TODO: boundary check is NOT needed here, but for some reason CI fuzz tests are failing.
+	// l.start 和 l.end 应该始终在合法范围内
 	if l.start > len(l.source) || l.end > len(l.source) {
 		return "__invalid__"
 	}
+	// 取 [start:end] 区间内容作为当前 word
 	return string(l.source[l.start:l.end])
 }
 
@@ -126,14 +130,18 @@ func (l *lexer) skipSpaces() {
 func (l *lexer) acceptWord(word string) bool {
 	pos := l.end
 
+	// 跳过所有前导空白字符
 	l.skipSpaces()
 
+	// 检查后续字符是否和 word 匹配，不匹配直接回滚并返回
 	for _, ch := range word {
 		if l.next() != ch {
-			l.end = pos
+			l.end = pos // 匹配失败时完全回退，不改变 lexer 状态
 			return false
 		}
 	}
+
+	// 确保完整匹配而非子串
 	if r := l.peek(); r != ' ' && r != eof {
 		l.end = pos
 		return false
