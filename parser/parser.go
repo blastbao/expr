@@ -420,7 +420,7 @@ func (p *parser) parseExpression(precedence int) Node {
 						Node:     nodeLeft,
 					}, notToken.Location)
 				}
-
+				p.logf("[OP] Finish binary op `%s`", opToken.Value)
 				goto next
 			} else {
 				p.logf("[OP] Stop handle op `%v` because prec %d < required %d", opToken.Value, operator.Binary[opToken.Value].Precedence, precedence)
