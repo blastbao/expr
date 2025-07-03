@@ -25,6 +25,20 @@ type Nature struct {
 	FieldIndex      []int             // Index of field in type.
 }
 
+type Comments struct {
+	Type            reflect.Type      // 值的类型（比如 int、[]string、map[string]int）
+	Func            *builtin.Function // 如果是内置函数，这里保留函数定义信息
+	ArrayOf         *Nature           // 如果是数组/切片，其元素类型
+	PredicateOut    *Nature           // 如果是谓词函数，返回类型（常用于过滤场景）
+	Fields          map[string]Nature // 如果是 Map，用于描述键 -> 值类型映射
+	DefaultMapValue *Nature           // Map 默认值类型（没有 key 命中时）
+	Strict          bool              // 是否为严格 map（键固定，不能任意添加）
+	Nil             bool              // 是否为 nil 值
+	Method          bool              // 是否是通过 MethodByName 获得的 method
+	MethodIndex     int               // 方法索引（对应 reflect.Type.Method(index)）
+	FieldIndex      []int             // 如果是 struct 字段，其 index 路径（嵌套字段）
+}
+
 func (n Nature) IsAny() bool {
 	return n.Kind() == reflect.Interface && n.NumMethods() == 0
 }
@@ -46,6 +60,7 @@ func (n Nature) String() string {
 	return "unknown"
 }
 
+// Deref 解引用，得到最底层类型
 func (n Nature) Deref() Nature {
 	if n.Type != nil {
 		n.Type = deref.Type(n.Type)

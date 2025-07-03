@@ -101,15 +101,41 @@ func (c *compiler) nodeParent() ast.Node {
 	return nil
 }
 
+// 将一条指令插入到字节码序列中
+//
+// 参数：
+//   - loc：源代码位置信息（文件、行号、列号），用于错误报告和调试
+//   - op：操作码（要执行的指令类型）
+//   - arg：指令参数（通常是常量的索引或跳转偏移量）
+//
+// 操作：
+//   - 指令写入：将操作码追加到 bytecode 切片中
+//   - 位置记录：记录指令在字节码数组中的位置
+//   - 参数存储：参数单独存储在 arguments 切片中，与操作码保持平行对应关系
+//   - 调试信息：保留源码位置，用于生成调试信息
+//   - 位置返回：返回当前指令的位置，便于后续跳转指令的回填
+//
+// 假设有以下指令序列：
+//
+//	Push 10
+//	Push 20
+//	Add
+//
+// 内存中存储形式：
+//
+//	bytecode:   [OpPush, OpPush, OpAdd]
+//	arguments:  [1,      2,      0]           // 假设 10 在常量池索引 1 ，20 在索引 2
+//	locations:  [loc1,   loc2,   loc3]        // 各指令对应的源代码位置
 func (c *compiler) emitLocation(loc file.Location, op Opcode, arg int) int {
-	c.bytecode = append(c.bytecode, op)
-	current := len(c.bytecode)
-	c.arguments = append(c.arguments, arg)
-	c.locations = append(c.locations, loc)
-	return current
+	c.bytecode = append(c.bytecode, op)    // 添加操作码
+	current := len(c.bytecode)             // 获取指令地址
+	c.arguments = append(c.arguments, arg) // 添加参数数目
+	c.locations = append(c.locations, loc) // 添加源码位置
+	return current                         // 返回指令地址（可以用于跳转、回填等用途）
 }
 
 func (c *compiler) emit(op Opcode, args ...int) int {
+	// 获取参数，默认为 0
 	arg := 0
 	if len(args) > 1 {
 		panic("too many arguments")
@@ -117,10 +143,13 @@ func (c *compiler) emit(op Opcode, args ...int) int {
 	if len(args) == 1 {
 		arg = args[0]
 	}
+
+	// 获取当前节点的位置信息
 	var loc file.Location
 	if len(c.nodes) > 0 {
 		loc = c.nodes[len(c.nodes)-1].Location()
 	}
+
 	return c.emitLocation(loc, op, arg)
 }
 
@@ -128,13 +157,28 @@ func (c *compiler) emitPush(value any) int {
 	return c.emit(OpPush, c.addConstant(value))
 }
 
+// 编译器生成的字节码中通常不会直接嵌入字符串、数字、方法等对象，而是：
+//   - 将常量统一放入一个常量池（c.constants）
+//   - 字节码中只引用常量池的索引（节省空间，利于共享）
 func (c *compiler) addConstant(constant any) int {
 	indexable := true
 	hash := constant
 	switch reflect.TypeOf(constant).Kind() {
 	case reflect.Slice, reflect.Map, reflect.Struct, reflect.Func:
+		// 对于不可索引的对象，无法用 map 去重，所以每次都保存为新的常量。
+		//
+		// Q: 对于不可索引的类型，为什么不用 fmt.Sprintf("%v", obj) 这种方式呢？
+		// A:
+		//	- 复杂类型 %v 格式化可能无法保证唯一，如 map
+		//  - 复杂类型 %v 格式化开销很大，不格式化也只是浪费些空间，trade off
 		indexable = false
 	}
+
+	// 有两个 Struct 特殊处理下。
+	//
+	// 对于一般的指针类型（比如 *runtime.Field），Go 默认用的是指针做 key，两个内容相同但不同实例的 *runtime.Field 指针是不相等的，
+	// 即便字段名和类型都一样，这样会导致重复插入内容相同的不同实例到常量池里。
+	// 这里通过 fmt.Sprintf("%v", field) 把内容提取出来作为 key ，可以避免重复插入。
 	if field, ok := constant.(*runtime.Field); ok {
 		indexable = true
 		hash = fmt.Sprintf("%v", field)
@@ -143,26 +187,31 @@ func (c *compiler) addConstant(constant any) int {
 		indexable = true
 		hash = fmt.Sprintf("%v", method)
 	}
+
+	// 对于可比较的对象，如果常量已存在，直接返回，避免重复插入；
+	// 对不可比较的对象，不判重，直接插入到常量池中；
 	if indexable {
 		if p, ok := c.constantsIndex[hash]; ok {
 			return p
 		}
 	}
+
+	// 添加到常量池
 	c.constants = append(c.constants, constant)
 	p := len(c.constants) - 1
 	if indexable {
 		c.constantsIndex[hash] = p
 	}
+
+	// 返回编号
 	return p
 }
 
-func (c *compiler) addVariable(name string) int {
-	c.variables++
-	c.debugInfo[fmt.Sprintf("var_%d", c.variables-1)] = name
-	return c.variables - 1
-}
-
 // emitFunction adds builtin.Function.Func to the program.functions and emits call opcode.
+//
+// 根据参数个数选择合适的 opcode ，生成对应的字节码指令，让虚拟机能在运行时正确地调用该函数。
+//
+// 高频场景（参数≤3）使用特化指令，子节码更紧凑（少一个 ArgsLen 参数），减少指令解码开销；通过 OpCallN 支持任意数量参数；
 func (c *compiler) emitFunction(fn *builtin.Function, argsLen int) {
 	switch argsLen {
 	case 0:
@@ -180,6 +229,8 @@ func (c *compiler) emitFunction(fn *builtin.Function, argsLen int) {
 }
 
 // addFunction adds builtin.Function.Func to the program.functions and returns its index.
+//
+// 将函数 fn 注册到 compiler.functions 中，如果已经存在直接返回编号，避免重复插入。
 func (c *compiler) addFunction(name string, fn Function) int {
 	if fn == nil {
 		panic("function is nil")
@@ -190,7 +241,7 @@ func (c *compiler) addFunction(name string, fn Function) int {
 	p := len(c.functions)
 	c.functions = append(c.functions, fn)
 	c.functionsIndex[name] = p
-	c.debugInfo[fmt.Sprintf("func_%d", p)] = name
+	c.debugInfo[fmt.Sprintf("func_%d", p)] = name // 记录调试信息 <func_no, func_name>
 	return p
 }
 
@@ -323,6 +374,7 @@ func (c *compiler) IntegerNode(node *ast.IntegerNode) {
 		c.emitPush(node.Value)
 		return
 	}
+
 	switch t.Kind() {
 	case reflect.Float32:
 		c.emitPush(float32(node.Value))
@@ -593,18 +645,22 @@ func (c *compiler) BinaryNode(node *ast.BinaryNode) {
 }
 
 func (c *compiler) equalBinaryNode(node *ast.BinaryNode) {
+	// 获取左右操作数的类型
 	l := kind(node.Left.Type())
 	r := kind(node.Right.Type())
 
+	// 检查是否为简单类型
 	leftIsSimple := isSimpleType(node.Left)
 	rightIsSimple := isSimpleType(node.Right)
 	leftAndRightAreSimple := leftIsSimple && rightIsSimple
 
+	// 编译左右操作数
 	c.compile(node.Left)
 	c.derefInNeeded(node.Left)
 	c.compile(node.Right)
 	c.derefInNeeded(node.Right)
 
+	// 根据类型生成特化指令
 	if l == r && l == reflect.Int && leftAndRightAreSimple {
 		c.emit(OpEqualInt)
 	} else if l == r && l == reflect.String && leftAndRightAreSimple {
@@ -730,10 +786,14 @@ func (c *compiler) SliceNode(node *ast.SliceNode) {
 }
 
 func (c *compiler) CallNode(node *ast.CallNode) {
+
 	fn := node.Callee.Type()
+
 	if fn.Kind() == reflect.Func {
+
 		fnInOffset := 0
 		fnNumIn := fn.NumIn()
+
 		switch callee := node.Callee.(type) {
 		case *ast.MemberNode:
 			if prop, ok := callee.Property.(*ast.StringNode); ok {
@@ -748,6 +808,7 @@ func (c *compiler) CallNode(node *ast.CallNode) {
 				fnNumIn--
 			}
 		}
+
 		for i, arg := range node.Arguments {
 			c.compile(arg)
 
@@ -760,6 +821,7 @@ func (c *compiler) CallNode(node *ast.CallNode) {
 
 			c.derefParam(in, arg)
 		}
+
 	} else {
 		for _, arg := range node.Arguments {
 			c.compile(arg)
@@ -1162,6 +1224,19 @@ func (c *compiler) PointerNode(node *ast.PointerNode) {
 	default:
 		panic(fmt.Sprintf("unknown pointer %v", node.Name))
 	}
+}
+
+// var x = 10; x + 5
+//
+// Push 10     ; 入栈初始数值
+// Store 0     ; 存储到变量 0 ，即 x
+// LoadVar 0   ; 读取变量 0
+// Push 5      ; 入栈参数数值
+// Add         ; 相加
+func (c *compiler) addVariable(name string) int {
+	c.variables++
+	c.debugInfo[fmt.Sprintf("var_%d", c.variables-1)] = name
+	return c.variables - 1
 }
 
 func (c *compiler) VariableDeclaratorNode(node *ast.VariableDeclaratorNode) {

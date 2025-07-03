@@ -10,15 +10,7 @@ func Interface(p any) any {
 		return nil
 	}
 
-	v := reflect.ValueOf(p)
-
-	for v.Kind() == reflect.Ptr || v.Kind() == reflect.Interface {
-		if v.IsNil() {
-			return nil
-		}
-		v = v.Elem()
-	}
-
+	v := Value(reflect.ValueOf(p))
 	if v.IsValid() {
 		return v.Interface()
 	}
@@ -26,6 +18,7 @@ func Interface(p any) any {
 	panic(fmt.Sprintf("cannot dereference %v", p))
 }
 
+// Type 对 t 进行指针的循环解引用，直到拿到实际的类型。
 func Type(t reflect.Type) reflect.Type {
 	if t == nil {
 		return nil
@@ -36,6 +29,7 @@ func Type(t reflect.Type) reflect.Type {
 	return t
 }
 
+// Value 对 v 进行指针的循环解引用，直到拿到实际的值。
 func Value(v reflect.Value) reflect.Value {
 	for v.Kind() == reflect.Ptr || v.Kind() == reflect.Interface {
 		if v.IsNil() {
