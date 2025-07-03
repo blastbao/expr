@@ -10,6 +10,11 @@ import (
 	"github.com/expr-lang/expr/internal/deref"
 )
 
+// Fetch 从各种数据结构中提取元素或字段，支持以下数据类型：
+//   - 数组/切片/字符串（通过索引访问）
+//   - 映射（通过 key 访问）
+//   - 结构体（通过字段名访问）
+//   - 方法（通过方法名调用）
 func Fetch(from, i any) any {
 	v := reflect.ValueOf(from)
 	if v.Kind() == reflect.Invalid {
@@ -82,6 +87,24 @@ type Field struct {
 	Path  []string
 }
 
+// FetchField 从结构体中获取嵌套字段的值，支持通过索引路径访问嵌套结构体字段。
+//
+// 示例：
+//
+//	user := User{
+//	   Name: "John",
+//	   Address: &struct{City string; Zip int}{
+//	       City: "NY",
+//	       Zip: 10001,
+//	   },
+//	}
+//
+//	field := &Field{
+//	   Index: []int{1, 0}, // Address -> City
+//	   Path: []string{"Address", "City"},
+//	}
+//
+//	FetchField(user, field) // 返回 "NY"
 func FetchField(from any, field *Field) any {
 	v := reflect.ValueOf(from)
 	if v.Kind() != reflect.Invalid {
@@ -137,9 +160,28 @@ func FetchMethod(from any, method *Method) any {
 	panic(fmt.Sprintf("cannot fetch %v from %T", method.Name, from))
 }
 
+// Slice
+//
+// 示例
+//
+//	// 数组切片
+//	arr := [5]int{1, 2, 3, 4, 5}
+//	Slice(arr, 1, 3)  // 返回 [2, 3]
+//
+//	// 切片操作
+//	Slice([]string{"a", "b", "c"}, 0, -1)  // 返回 ["a", "b"]
+//
+//	// 字符串切片
+//	Slice("hello", 1, 4)  // 返回 "ell"
+//
+//	// 负索引
+//	Slice([]int{1, 2, 3, 4}, -3, -1)  // 返回 [2, 3]
+//
+//	// 指针解引用
+//	str := "golang"
+//	Slice(&str, 2, 4)  // 返回 "la"
 func Slice(array, from, to any) any {
 	v := reflect.ValueOf(array)
-
 	switch v.Kind() {
 	case reflect.Array, reflect.Slice, reflect.String:
 		length := v.Len()
@@ -177,6 +219,14 @@ func Slice(array, from, to any) any {
 	panic(fmt.Sprintf("cannot slice %v", from))
 }
 
+// In
+//
+// 示例
+//   - In(3, []int{1, 2, 3})           		// true
+//   - In("a", map[string]int{"a": 1})  	// true
+//   - In("Name", struct{Name string}{}) 	// true
+//   - In(4, []int{1, 2, 3})           		// false
+//   - In(nil, []int{1, 2, 3})        	 	// false
 func In(needle any, array any) bool {
 	if array == nil {
 		return false
@@ -184,7 +234,6 @@ func In(needle any, array any) bool {
 	v := reflect.ValueOf(array)
 
 	switch v.Kind() {
-
 	case reflect.Array, reflect.Slice:
 		for i := 0; i < v.Len(); i++ {
 			value := v.Index(i)
@@ -195,7 +244,6 @@ func In(needle any, array any) bool {
 			}
 		}
 		return false
-
 	case reflect.Map:
 		var value reflect.Value
 		if needle == nil {
@@ -207,7 +255,6 @@ func In(needle any, array any) bool {
 			return true
 		}
 		return false
-
 	case reflect.Struct:
 		n := reflect.ValueOf(needle)
 		if !n.IsValid() || n.Kind() != reflect.String {
@@ -218,7 +265,6 @@ func In(needle any, array any) bool {
 			return true
 		}
 		return false
-
 	case reflect.Ptr:
 		value := v.Elem()
 		if value.IsValid() {
@@ -226,7 +272,6 @@ func In(needle any, array any) bool {
 		}
 		return false
 	}
-
 	panic(fmt.Sprintf(`operator "in" not defined on %T`, array))
 }
 
@@ -275,6 +320,13 @@ func Exponent(a, b any) float64 {
 	return math.Pow(ToFloat64(a), ToFloat64(b))
 }
 
+// MakeRange 创建一个 []int 切片，包含从 min 到 max 的所有整数。
+//
+// 例子:
+//   - MakeRange(1, 5)  // 返回 [1, 2, 3, 4, 5]
+//   - MakeRange(3, 3)  // 返回 [3]
+//   - MakeRange(5, 2)  // 返回 []
+//   - MakeRange(-2, 2) // 返回 [-2, -1, 0, 1, 2]
 func MakeRange(min, max int) []int {
 	size := max - min + 1
 	if size <= 0 {

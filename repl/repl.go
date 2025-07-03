@@ -21,8 +21,7 @@ var keywords = []string{
 	"exit", "opcodes", "debug", "mem",
 
 	// Operators:
-	"and", "or", "in", "not", "not in",
-	"contains", "matches", "startsWith", "endsWith",
+	"and", "or", "in", "not", "not in", "contains", "matches", "startsWith", "endsWith",
 }
 
 func main() {

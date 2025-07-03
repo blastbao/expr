@@ -46,6 +46,18 @@ type VM struct {
 	curr         chan int
 }
 
+//type VM struct {
+//	Stack        []any         // 操作数栈
+//	Scopes       []*Scope      // 支持循环、排序等作用域的结构栈
+//	Variables    []any         // 局部变量表
+//	MemoryBudget uint          // 内存预算限制（限制栈使用）
+//	ip           int           // 指令指针（当前执行到哪个字节码）
+//	memory       uint          // 当前使用内存估计
+//	debug        bool          // 是否开启调试
+//	step         chan struct{} // 手动步进通道（debug 模式）
+//	curr         chan int      // 当前执行位置输出通道（debug 模式）
+//}
+
 func (vm *VM) Run(program *Program, env any) (_ any, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -91,175 +103,144 @@ func (vm *VM) Run(program *Program, env any) (_ any, err error) {
 		vm.ip += 1
 
 		switch op {
-
 		case OpInvalid:
 			panic("invalid opcode")
-
 		case OpPush:
+			// 将第 arg 个常量入栈
 			vm.push(program.Constants[arg])
-
 		case OpInt:
+			// 将字面量 arg 入栈
 			vm.push(arg)
-
 		case OpPop:
+			// 出栈
 			vm.pop()
-
 		case OpStore:
+			// 把栈顶元素弹出并赋值给变量 vars[arg]
 			vm.Variables[arg] = vm.pop()
-
 		case OpLoadVar:
+			// 把变量 vars[arg] 入栈
 			vm.push(vm.Variables[arg])
-
 		case OpLoadConst:
+			// 从 env 中获取第 arg 个常量的值
 			vm.push(runtime.Fetch(env, program.Constants[arg]))
-
 		case OpLoadField:
+			// 从 env 中获取第 arg 个常量所表示的嵌套字段的值
 			vm.push(runtime.FetchField(env, program.Constants[arg].(*runtime.Field)))
-
 		case OpLoadFast:
+			// 从 env 中获取第 arg 个常量的值，这里常量是字符串类型
 			vm.push(env.(map[string]any)[program.Constants[arg].(string)])
-
 		case OpLoadMethod:
+			// 从 env 中获取第 arg 个常量所表示的方法下标
 			vm.push(runtime.FetchMethod(env, program.Constants[arg].(*runtime.Method)))
-
 		case OpLoadFunc:
+			// 把第 arg 个函数入栈
 			vm.push(program.functions[arg])
-
 		case OpFetch:
+			// 从 a 中获取 b 值 c ，然后入栈
 			b := vm.pop()
 			a := vm.pop()
 			vm.push(runtime.Fetch(a, b))
-
 		case OpFetchField:
 			a := vm.pop()
 			vm.push(runtime.FetchField(a, program.Constants[arg].(*runtime.Field)))
-
 		case OpLoadEnv:
 			vm.push(env)
-
 		case OpMethod:
 			a := vm.pop()
 			vm.push(runtime.FetchMethod(a, program.Constants[arg].(*runtime.Method)))
-
 		case OpTrue:
 			vm.push(true)
-
 		case OpFalse:
 			vm.push(false)
-
 		case OpNil:
 			vm.push(nil)
-
 		case OpNegate:
 			v := runtime.Negate(vm.pop())
 			vm.push(v)
-
 		case OpNot:
 			v := vm.pop().(bool)
 			vm.push(!v)
-
 		case OpEqual:
 			b := vm.pop()
 			a := vm.pop()
 			vm.push(runtime.Equal(a, b))
-
 		case OpEqualInt:
 			b := vm.pop()
 			a := vm.pop()
 			vm.push(a.(int) == b.(int))
-
 		case OpEqualString:
 			b := vm.pop()
 			a := vm.pop()
 			vm.push(a.(string) == b.(string))
-
-		case OpJump:
+		case OpJump: // Jmp XXX ，修改 ip 跳转到指定 op ，这里都是相对寻址，基于当前 ip 作偏移
 			vm.ip += arg
-
 		case OpJumpIfTrue:
 			if vm.current().(bool) {
 				vm.ip += arg
 			}
-
 		case OpJumpIfFalse:
 			if !vm.current().(bool) {
 				vm.ip += arg
 			}
-
 		case OpJumpIfNil:
 			if runtime.IsNil(vm.current()) {
 				vm.ip += arg
 			}
-
 		case OpJumpIfNotNil:
 			if !runtime.IsNil(vm.current()) {
 				vm.ip += arg
 			}
-
 		case OpJumpIfEnd:
 			scope := vm.scope()
 			if scope.Index >= scope.Len {
 				vm.ip += arg
 			}
-
 		case OpJumpBackward:
 			vm.ip -= arg
-
 		case OpIn:
 			b := vm.pop()
 			a := vm.pop()
 			vm.push(runtime.In(a, b))
-
 		case OpLess:
 			b := vm.pop()
 			a := vm.pop()
 			vm.push(runtime.Less(a, b))
-
 		case OpMore:
 			b := vm.pop()
 			a := vm.pop()
 			vm.push(runtime.More(a, b))
-
 		case OpLessOrEqual:
 			b := vm.pop()
 			a := vm.pop()
 			vm.push(runtime.LessOrEqual(a, b))
-
 		case OpMoreOrEqual:
 			b := vm.pop()
 			a := vm.pop()
 			vm.push(runtime.MoreOrEqual(a, b))
-
 		case OpAdd:
 			b := vm.pop()
 			a := vm.pop()
 			vm.push(runtime.Add(a, b))
-
 		case OpSubtract:
 			b := vm.pop()
 			a := vm.pop()
 			vm.push(runtime.Subtract(a, b))
-
 		case OpMultiply:
 			b := vm.pop()
 			a := vm.pop()
 			vm.push(runtime.Multiply(a, b))
-
 		case OpDivide:
 			b := vm.pop()
 			a := vm.pop()
 			vm.push(runtime.Divide(a, b))
-
 		case OpModulo:
 			b := vm.pop()
 			a := vm.pop()
 			vm.push(runtime.Modulo(a, b))
-
 		case OpExponent:
 			b := vm.pop()
 			a := vm.pop()
 			vm.push(runtime.Exponent(a, b))
-
 		case OpRange:
 			b := vm.pop()
 			a := vm.pop()
@@ -271,7 +252,6 @@ func (vm *VM) Run(program *Program, env any) (_ any, err error) {
 			}
 			vm.memGrow(uint(size))
 			vm.push(runtime.MakeRange(min, max))
-
 		case OpMatches:
 			b := vm.pop()
 			a := vm.pop()
@@ -284,7 +264,6 @@ func (vm *VM) Run(program *Program, env any) (_ any, err error) {
 				panic(err)
 			}
 			vm.push(match)
-
 		case OpMatchesConst:
 			a := vm.pop()
 			if runtime.IsNil(a) {
@@ -293,7 +272,6 @@ func (vm *VM) Run(program *Program, env any) (_ any, err error) {
 			}
 			r := program.Constants[arg].(*regexp.Regexp)
 			vm.push(r.MatchString(a.(string)))
-
 		case OpContains:
 			b := vm.pop()
 			a := vm.pop()
@@ -302,7 +280,6 @@ func (vm *VM) Run(program *Program, env any) (_ any, err error) {
 				break
 			}
 			vm.push(strings.Contains(a.(string), b.(string)))
-
 		case OpStartsWith:
 			b := vm.pop()
 			a := vm.pop()
@@ -311,7 +288,6 @@ func (vm *VM) Run(program *Program, env any) (_ any, err error) {
 				break
 			}
 			vm.push(strings.HasPrefix(a.(string), b.(string)))
-
 		case OpEndsWith:
 			b := vm.pop()
 			a := vm.pop()
@@ -320,14 +296,18 @@ func (vm *VM) Run(program *Program, env any) (_ any, err error) {
 				break
 			}
 			vm.push(strings.HasSuffix(a.(string), b.(string)))
-
 		case OpSlice:
 			from := vm.pop()
 			to := vm.pop()
 			node := vm.pop()
 			vm.push(runtime.Slice(node, from, to))
-
 		case OpCall:
+			// 步骤:
+			// 	- 从栈中获取函数：使用 vm.pop() 获取要调用的函数
+			//	- 准备参数：根据参数个数(arg)从栈中弹出参数
+			//	- 处理nil参数：将nil参数转换为对应类型的零值
+			//	- 执行调用：使用反射调用函数
+			//	- 处理返回值：检查错误返回值并将结果压回栈中
 			fn := reflect.ValueOf(vm.pop())
 			size := arg
 			in := make([]reflect.Value, size)
@@ -344,14 +324,12 @@ func (vm *VM) Run(program *Program, env any) (_ any, err error) {
 				panic(out[1].Interface().(error))
 			}
 			vm.push(out[0].Interface())
-
 		case OpCall0:
 			out, err := program.functions[arg]()
 			if err != nil {
 				panic(err)
 			}
 			vm.push(out)
-
 		case OpCall1:
 			a := vm.pop()
 			out, err := program.functions[arg](a)
@@ -359,7 +337,6 @@ func (vm *VM) Run(program *Program, env any) (_ any, err error) {
 				panic(err)
 			}
 			vm.push(out)
-
 		case OpCall2:
 			b := vm.pop()
 			a := vm.pop()
@@ -368,7 +345,6 @@ func (vm *VM) Run(program *Program, env any) (_ any, err error) {
 				panic(err)
 			}
 			vm.push(out)
-
 		case OpCall3:
 			c := vm.pop()
 			b := vm.pop()
@@ -378,7 +354,6 @@ func (vm *VM) Run(program *Program, env any) (_ any, err error) {
 				panic(err)
 			}
 			vm.push(out)
-
 		case OpCallN:
 			fn := vm.pop().(Function)
 			size := arg
@@ -391,7 +366,6 @@ func (vm *VM) Run(program *Program, env any) (_ any, err error) {
 				panic(err)
 			}
 			vm.push(out)
-
 		case OpCallFast:
 			fn := vm.pop().(func(...any) any)
 			size := arg
@@ -400,7 +374,6 @@ func (vm *VM) Run(program *Program, env any) (_ any, err error) {
 				in[i] = vm.pop()
 			}
 			vm.push(fn(in...))
-
 		case OpCallSafe:
 			fn := vm.pop().(SafeFunction)
 			size := arg
@@ -414,13 +387,10 @@ func (vm *VM) Run(program *Program, env any) (_ any, err error) {
 			}
 			vm.memGrow(mem)
 			vm.push(out)
-
 		case OpCallTyped:
 			vm.push(vm.call(vm.pop(), arg))
-
 		case OpCallBuiltin1:
 			vm.push(builtin.Builtins[arg].Fast(vm.pop()))
-
 		case OpArray:
 			size := vm.pop().(int)
 			vm.memGrow(uint(size))
@@ -429,7 +399,6 @@ func (vm *VM) Run(program *Program, env any) (_ any, err error) {
 				array[i] = vm.pop()
 			}
 			vm.push(array)
-
 		case OpMap:
 			size := vm.pop().(int)
 			vm.memGrow(uint(size))
@@ -440,10 +409,8 @@ func (vm *VM) Run(program *Program, env any) (_ any, err error) {
 				m[key.(string)] = value
 			}
 			vm.push(m)
-
 		case OpLen:
 			vm.push(runtime.Len(vm.current()))
-
 		case OpCast:
 			switch arg {
 			case 0:
@@ -453,50 +420,37 @@ func (vm *VM) Run(program *Program, env any) (_ any, err error) {
 			case 2:
 				vm.push(runtime.ToFloat64(vm.pop()))
 			}
-
 		case OpDeref:
 			a := vm.pop()
 			vm.push(deref.Interface(a))
-
 		case OpIncrementIndex:
 			vm.scope().Index++
-
 		case OpDecrementIndex:
 			scope := vm.scope()
 			scope.Index--
-
 		case OpIncrementCount:
 			scope := vm.scope()
 			scope.Count++
-
 		case OpGetIndex:
 			vm.push(vm.scope().Index)
-
 		case OpGetCount:
 			scope := vm.scope()
 			vm.push(scope.Count)
-
 		case OpGetLen:
 			scope := vm.scope()
 			vm.push(scope.Len)
-
 		case OpGetAcc:
 			vm.push(vm.scope().Acc)
-
 		case OpSetAcc:
 			vm.scope().Acc = vm.pop()
-
 		case OpSetIndex:
 			scope := vm.scope()
 			scope.Index = vm.pop().(int)
-
 		case OpPointer:
 			scope := vm.scope()
 			vm.push(scope.Array.Index(scope.Index).Interface())
-
 		case OpThrow:
 			panic(vm.pop().(error))
-
 		case OpCreate:
 			switch arg {
 			case 1:
@@ -520,13 +474,11 @@ func (vm *VM) Run(program *Program, env any) (_ any, err error) {
 			default:
 				panic(fmt.Sprintf("unknown OpCreate argument %v", arg))
 			}
-
 		case OpGroupBy:
 			scope := vm.scope()
 			key := vm.pop()
 			item := scope.Array.Index(scope.Index).Interface()
 			scope.Acc.(groupBy)[key] = append(scope.Acc.(groupBy)[key], item)
-
 		case OpSortBy:
 			scope := vm.scope()
 			value := vm.pop()
@@ -534,22 +486,18 @@ func (vm *VM) Run(program *Program, env any) (_ any, err error) {
 			sortable := scope.Acc.(*runtime.SortBy)
 			sortable.Array = append(sortable.Array, item)
 			sortable.Values = append(sortable.Values, value)
-
 		case OpSort:
 			scope := vm.scope()
 			sortable := scope.Acc.(*runtime.SortBy)
 			sort.Sort(sortable)
 			vm.memGrow(uint(scope.Len))
 			vm.push(sortable.Array)
-
 		case OpProfileStart:
 			span := program.Constants[arg].(*Span)
 			span.start = time.Now()
-
 		case OpProfileEnd:
 			span := program.Constants[arg].(*Span)
 			span.Duration += time.Since(span.start).Nanoseconds()
-
 		case OpBegin:
 			a := vm.pop()
 			array := reflect.ValueOf(a)
@@ -557,14 +505,11 @@ func (vm *VM) Run(program *Program, env any) (_ any, err error) {
 				Array: array,
 				Len:   array.Len(),
 			})
-
 		case OpEnd:
 			vm.Scopes = vm.Scopes[:len(vm.Scopes)-1]
-
 		default:
 			panic(fmt.Sprintf("unknown bytecode %#x", op))
 		}
-
 		if debug && vm.debug {
 			vm.curr <- vm.ip
 		}
@@ -578,16 +523,15 @@ func (vm *VM) Run(program *Program, env any) (_ any, err error) {
 	if len(vm.Stack) > 0 {
 		return vm.pop(), nil
 	}
-
 	return nil, nil
-}
-
-func (vm *VM) push(value any) {
-	vm.Stack = append(vm.Stack, value)
 }
 
 func (vm *VM) current() any {
 	return vm.Stack[len(vm.Stack)-1]
+}
+
+func (vm *VM) push(value any) {
+	vm.Stack = append(vm.Stack, value)
 }
 
 func (vm *VM) pop() any {
