@@ -426,15 +426,13 @@ func (c *compiler) IdentifierNode(node *ast.IdentifierNode) {
 // IntegerNode
 // 根据整数节点的类型和值生成相应的操作码（OpCode）
 //
-//
 // 如果节点没有指定类型，直接按原始值处理，否则按目标类型转换、范围检查后再输出；
 //
-// 	[类型分类]	[检查规则]					[说明]
+//	[类型分类]	[检查规则]					[说明]
 //	有符号整数	int, int8, int16, ...		检查上/下限
 //	无符号整数	uint, uint8, ...			需判断非负 + 上限
 //	浮点数		float32, float64			直接转换（无上限检查）
 //	未指定		nil 或未知类型				不转换，直接存原始 int
-
 func (c *compiler) IntegerNode(node *ast.IntegerNode) {
 	t := node.Type()
 	c.logf("[COMPILE] IntegerNode type is %v", t)
@@ -797,17 +795,47 @@ func isSimpleType(node ast.Node) bool {
 	return t.PkgPath() == ""
 }
 
+// ChainNode
+//
+// `?.` 是空值安全的链式访问符，例如 `user?.profile?.email`，只要任意中间节点为 nil，整个表达式就立即返回 nil，不会 panic。
+// `?.` 用于避免因 nil 解引用导致的运行时错误。
+//
+// 示例1，普通链式调用：a?.b?.c
+//
+//	LOAD_VAR a           ; 1. 加载 a
+//	JUMP_IF_NIL end      ; 2. 如果 a 为 nil，跳转到 end
+//	GET_PROPERTY b       ; 3. 否则访问 a.b
+//	JUMP_IF_NIL end      ; 4. 如果 a.b 为 nil，跳转到 end
+//	GET_PROPERTY c       ; 5. 否则访问 a.b.c
+//	end:                 ; 6. 链中断时跳转到这里
+//	JUMP_IF_NOT_NIL exit ; 7. 如果结果非 nil，跳过 nil 推送
+//	POP                  ; 8. 弹出结果
+//	PUSH_NIL             ; 9. 推送 nil
+//	exit:                ; 10. 结束
+//
+// 示例2，与 ?? 协作： a?.b?.c ?? 0 ，如果 a?.b?.c 为 nil 就返回 0 。
+//
+//	LOAD_VAR a           ; 1. 加载 a
+//	JUMP_IF_NIL end      ; 2. 如果 a 为 nil，跳转到 end
+//	GET_PROPERTY b       ; 3. 否则访问 a.b
+//	JUMP_IF_NIL end      ; 4. 如果 a.b 为 nil，跳转到 end
+//	GET_PROPERTY c       ; 5. 否则访问 a.b.c
+//	end:                 ; 6. 链中断时跳转到这里
+//	; 由 ?? 运算符处理后续逻辑（此处不生成 PUSH_NIL）
 func (c *compiler) ChainNode(node *ast.ChainNode) {
 	c.chains = append(c.chains, []int{})
 	c.compile(node.Node)
 	for _, ph := range c.chains[len(c.chains)-1] {
 		c.patchJump(ph) // If chain activated jump here (got nit somewhere).
 	}
+
 	parent := c.nodeParent()
 	if binary, ok := parent.(*ast.BinaryNode); ok && binary.Operator == "??" {
 		// If chain is used in nil coalescing operator, we can omit
 		// nil push at the end of the chain. The ?? operator will
 		// handle it.
+		//
+		// 在 `??` 运算符中，跳过显式 nil 推送（由 ?? 处理）
 	} else {
 		// We need to put the nil on the stack, otherwise "typed"
 		// nil will be used as a result of the chain.
@@ -819,12 +847,31 @@ func (c *compiler) ChainNode(node *ast.ChainNode) {
 	c.chains = c.chains[:len(c.chains)-1]
 }
 
+// 	user.Name
+// 	user?.Address.City
+//	user?.profile?.email
+//	env?.config?.get("token")
+//	session.data?.user?.profile?.email ?? "anonymous"
+//
+// 方法访问 a.b()		OpMethod + runtime.Method
+// 静态字段路径优化 a.b.c	OpLoadField + 折叠索引
+// 动态字段名 a[key]		OpFetch
+// 可选链 a?.b			OpJumpIfNil + PushNil
+// 支持链式回填			通过 c.chains 在 ChainNode 管理跳转
+
+// MemberNode 表示 访问某个对象的字段或属性，也就是 a.b 这种表达式。
+// 如果是 a.b()，可能会被视为 MethodNode。
+// a?.b 是可选成员访问，对应 node.Optional = true。
 func (c *compiler) MemberNode(node *ast.MemberNode) {
+	// 编译器通过 env 分析用户传入的环境变量结构，用于检查是否可以静态识别出字段或方法。
 	var env Nature
 	if c.config != nil {
 		env = c.config.Env
 	}
 
+	// 检查 node 是否 env 的成员方法
+	//
+	// 如果这个节点表示的是方法调用（非立即调用，而是“获取方法”），就发射 OpMethod 字节码，并返回。
 	if ok, index, name := checker.MethodIndex(env, node); ok {
 		c.compile(node.Node)
 		c.emit(OpMethod, c.addConstant(&runtime.Method{
@@ -833,19 +880,31 @@ func (c *compiler) MemberNode(node *ast.MemberNode) {
 		}))
 		return
 	}
+
+	// 默认字段访问操作为 OpFetch ，走运行时动态字段访问（通过 Map/Struct 反射查找）；
+	// 如果能静态确定字段路径，就优化为 OpFetchField 。
 	op := OpFetch
 	base := node.Node
 
+	// 检查 node 是否是 env 的字段
+	// 尝试解析完整的字段路径（字段折叠）
 	ok, index, nodeName := checker.FieldIndex(env, node)
 	path := []string{nodeName}
 
 	if ok {
 		op = OpFetchField
+
+		// 尝试向上折叠字段路径（优化链式访问）
 		for !node.Optional {
+			// 非可选链时尝试嵌套优化，将多层静态字段访问（如 a.b.c）合并为单次 OpLoadField 。
+			//
+			// user.profile.email 会被优化为一个完整字段路径 [0,1,2]，直接生成一个 OpLoadField 指令，而不是多条逐级访问的 Fetch。
+
+			// 处理标识符（如 `obj` 在 `obj.sub.field`）
 			if ident, isIdent := base.(*ast.IdentifierNode); isIdent {
 				if ok, identIndex, name := checker.FieldIndex(env, ident); ok {
-					index = append(identIndex, index...)
-					path = append([]string{name}, path...)
+					index = append(identIndex, index...)   // 合并嵌套索引
+					path = append([]string{name}, path...) // 合并嵌套路径
 					c.emitLocation(ident.Location(), OpLoadField, c.addConstant(
 						&runtime.Field{Index: index, Path: path},
 					))
@@ -853,6 +912,7 @@ func (c *compiler) MemberNode(node *ast.MemberNode) {
 				}
 			}
 
+			// 处理嵌套 MemberNode（如 `obj.sub` 在 `obj.sub.field`）
 			if member, isMember := base.(*ast.MemberNode); isMember {
 				if ok, memberIndex, name := checker.FieldIndex(env, member); ok {
 					index = append(memberIndex, index...)
@@ -868,18 +928,32 @@ func (c *compiler) MemberNode(node *ast.MemberNode) {
 		}
 	}
 
+	// 不能静态优化，继续编译 base
 	c.compile(base)
+
 	// If the field is optional, we need to jump over the fetch operation.
 	// If no ChainNode (none c.chains) is used, do not compile the optional fetch.
+	//
+	// 支持可选链：生成条件跳转指令，如果值是 nil 就跳过本次成员访问；
+	//
+	// user?.profile
+	//	如果 user 是 nil，就跳过访问 profile
+	//	c.chains 是配合 ChainNode 使用的跳转点集合
 	if node.Optional && len(c.chains) > 0 {
 		ph := c.emit(OpJumpIfNil, placeholder)
 		c.chains[len(c.chains)-1] = append(c.chains[len(c.chains)-1], ph)
 	}
 
 	if op == OpFetch {
+		// 动态成员名的情况：如 user[dynamicKey]
+		// 编译 Property 可能是一个变量（如 key）
+		// 发射 OpFetch 指令，在运行时反射查找字段
 		c.compile(node.Property)
 		c.emit(OpFetch)
 	} else {
+		// 静态字段访问
+		// 使用静态确定的字段路径生成 OpFetchField，提高执行效率
+		// runtime.Field 包含字段索引路径和路径名（用于调试）
 		c.emitLocation(node.Location(), op, c.addConstant(
 			&runtime.Field{Index: index, Path: path},
 		))
