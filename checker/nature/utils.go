@@ -24,7 +24,7 @@ func fieldName(field reflect.StructField) string {
 	return field.Name
 }
 
-// 从结构体类型 t 中查找名为 name 的字段
+// 从结构体类型 t 中查找名为 name 的字段，因为匿名字段的存在，可能要递归查询；
 func fetchField(t reflect.Type, name string) (reflect.StructField, bool) {
 	// If t is not a struct, early return.
 	if t.Kind() != reflect.Struct {

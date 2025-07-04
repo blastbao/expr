@@ -209,6 +209,13 @@ func (n Nature) IsFastMap() bool {
 	return false
 }
 
+// Get 尝试从 Nature 中获取名为 name 的方法或字段
+// 1. 判断类型是否为空：如果当前 Nature 为空类型（没有绑定任何 Go 类型），直接返回失败。
+// 2. 优先查找方法：调用 MethodByName 方法查找是否有同名方法。
+// 3. 获取底层反射类型，deref 用于剥离指针，把 *T 转成 T，这样可以匹配字段、方法等。
+// 4. 如果是 struct，查字段
+// 5. 如果是 map，查 kv pair
+// 6. 获取失败，返回 unknown
 func (n Nature) Get(name string) (Nature, bool) {
 	if n.Type == nil {
 		return unknown, false

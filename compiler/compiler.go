@@ -166,6 +166,14 @@ func (c *compiler) emitPush(value any) int {
 // 编译器生成的字节码中通常不会直接嵌入字符串、数字、方法等对象，而是：
 //   - 将常量统一放入一个常量池（c.constants）
 //   - 字节码中只引用常量池的索引（节省空间，利于共享）
+//
+// 有两个 Struct 特殊处理下。
+// 对于一般的指针类型（比如 *runtime.Field），Go 默认用的是指针做 key，两个内容相同但不同实例的 *runtime.Field 指针是不相等的，
+// 即便字段名和类型都一样，这样会导致重复插入内容相同的不同实例到常量池里。
+// 这里通过 fmt.Sprintf("%v", field) 把内容提取出来作为 key ，可以避免重复插入。
+//
+// 对于可比较的对象，如果常量已存在，直接返回，避免重复插入；
+// 对不可比较的对象，不判重，直接插入到常量池中；
 func (c *compiler) addConstant(constant any) int {
 	c.logf("[CONST] addConstant: constant=%T %v", constant, constant)
 
@@ -183,11 +191,6 @@ func (c *compiler) addConstant(constant any) int {
 		c.logf("[CONST] Non-indexable type: %T", constant)
 	}
 
-	// 有两个 Struct 特殊处理下。
-	//
-	// 对于一般的指针类型（比如 *runtime.Field），Go 默认用的是指针做 key，两个内容相同但不同实例的 *runtime.Field 指针是不相等的，
-	// 即便字段名和类型都一样，这样会导致重复插入内容相同的不同实例到常量池里。
-	// 这里通过 fmt.Sprintf("%v", field) 把内容提取出来作为 key ，可以避免重复插入。
 	if field, ok := constant.(*runtime.Field); ok {
 		indexable = true
 		hash = fmt.Sprintf("%v", field)
@@ -199,8 +202,6 @@ func (c *compiler) addConstant(constant any) int {
 		c.logf("[CONST] Special case *runtime.Method, key=%v", hash)
 	}
 
-	// 对于可比较的对象，如果常量已存在，直接返回，避免重复插入；
-	// 对不可比较的对象，不判重，直接插入到常量池中；
 	if indexable {
 		if p, ok := c.constantsIndex[hash]; ok {
 			c.logf("[CONST] Constant already exists at index %d", p)
@@ -208,7 +209,6 @@ func (c *compiler) addConstant(constant any) int {
 		}
 	}
 
-	// 添加到常量池
 	c.constants = append(c.constants, constant)
 	p := len(c.constants) - 1
 	if indexable {
@@ -218,7 +218,6 @@ func (c *compiler) addConstant(constant any) int {
 		c.logf("[CONST] Inserted non-indexable constant at %d", p)
 	}
 
-	// 返回编号
 	return p
 }
 
@@ -365,6 +364,29 @@ func (c *compiler) NilNode(_ *ast.NilNode) {
 	c.emit(OpNil)
 }
 
+// IdentifierNode 将 AST 中的 Identifier 转换成对应的 bytecode（加载变量、字段、方法、常量等）。
+// IdentifierNode 体现了编译器的 “多源绑定” 能力：变量名既可能来自本地作用域，也可能来自运行环境，还可能是静态常量。
+//
+// 步骤：
+//  1. 检查标识符是否是局部变量（函数参数、let 声明等），生成 OpLoadVar 操作码，并传入变量索引，然后返回。
+//  2. 如果标识符是特殊变量 "$env"，生成 OpLoadEnv 操作码（加载环境变量），然后返回。"$env" 代表用户传入的运行时环境，通常用于访问全局环境。
+//  3. 声明一个 env 变量，类型为 Nature ，如果编译器的配置（c.config）不为空，从配置中获取 c.config.Env 并赋值给 env 。
+//  4. 根据 env 的类型和标识符的不同情况，生成不同的操作码：
+//     4.1 如果 env 是 map[string]interface{} 类型，先将标识符作为常量添加到常量池中，然后生成 OpLoadFast 操作码，并传入常量索引。
+//     4.2 如果 env 是 struct ，尝试在 env 中查找字段，若找到会返回字段名、字段的 indexes ，然后生成 OpLoadField 操作码。
+//     4.3 如果 env 是 struct ，尝试在 env 中查找方法，若找到会返回方法名、方法的 index ，然后生成 OpLoadMethod 操作码。
+//     4.4 如果 env 是其它类型，把这个标识符当成常量名处理，先添加到常量池，然后生成 OpLoadConst 操作码，并传入常量索引。
+//
+// 表格：
+//
+//	| 优先级 | 判断条件                    | 发射指令        | 含义                 |
+//	| ----- | -------------------------- | -------------- | ----------------   |
+//	|   1   | 本地作用域有此变量            | `OpLoadVar`    | 从局部变量栈加载      |
+//	|   2   | 是 `$env` 特殊标识符         | `OpLoadEnv`    | 加载整个运行环境对象   |
+//	|   3   | `env` 是 map               | `OpLoadFast`   | 直接通过 key 加载     |
+//	|   4   | `env` 是 struct 且匹配字段   | `OpLoadField`  | 反射加载字段          |
+//	|   5   | `env` 是 struct 且匹配方法   | `OpLoadMethod` | 反射加载方法         |
+//	|   6   | 全都不匹配，回退为字符串常量    | `OpLoadConst`  | 当成普通字符串常量处理 |
 func (c *compiler) IdentifierNode(node *ast.IdentifierNode) {
 	if index, ok := c.lookupVariable(node.Value); ok {
 		c.emit(OpLoadVar, index)
