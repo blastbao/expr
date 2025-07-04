@@ -137,6 +137,17 @@ func TestCompile(t *testing.T) {
 			},
 		},
 		{
+			`1+2+3*-1+5*6`,
+			vm.Program{
+				Constants: []any{1},
+				Bytecode: []vm.Opcode{
+					vm.OpPush,
+					vm.OpNegate,
+				},
+				Arguments: []int{0, 0},
+			},
+		},
+		{
 			`true && true || true`,
 			vm.Program{
 				Bytecode: []vm.Opcode{

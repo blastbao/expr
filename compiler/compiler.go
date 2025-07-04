@@ -2,9 +2,11 @@ package compiler
 
 import (
 	"fmt"
+	"log"
 	"math"
 	"reflect"
 	"regexp"
+	"strings"
 
 	"github.com/expr-lang/expr/ast"
 	"github.com/expr-lang/expr/builtin"
@@ -37,6 +39,7 @@ func Compile(tree *parser.Tree, config *conf.Config) (program *Program, err erro
 	}
 
 	c.compile(tree.Node)
+	c.dump()
 
 	if c.config != nil {
 		switch c.config.Expect {
@@ -87,6 +90,8 @@ type compiler struct {
 	spans          []*Span
 	chains         [][]int
 	arguments      []int
+
+	compileDepth int
 }
 
 type scope struct {
@@ -135,8 +140,7 @@ func (c *compiler) emitLocation(loc file.Location, op Opcode, arg int) int {
 }
 
 func (c *compiler) emit(op Opcode, args ...int) int {
-	// 获取参数，默认为 0
-	arg := 0
+	arg := 0 // 参数默认为 0
 	if len(args) > 1 {
 		panic("too many arguments")
 	}
@@ -150,7 +154,9 @@ func (c *compiler) emit(op Opcode, args ...int) int {
 		loc = c.nodes[len(c.nodes)-1].Location()
 	}
 
-	return c.emitLocation(loc, op, arg)
+	ip := c.emitLocation(loc, op, arg)
+	c.logf("[EMIT] emit: op=%s, arg=%d, ip=%d, loc=%s", op, arg, ip, loc)
+	return ip
 }
 
 func (c *compiler) emitPush(value any) int {
@@ -161,6 +167,8 @@ func (c *compiler) emitPush(value any) int {
 //   - 将常量统一放入一个常量池（c.constants）
 //   - 字节码中只引用常量池的索引（节省空间，利于共享）
 func (c *compiler) addConstant(constant any) int {
+	c.logf("[CONST] addConstant: constant=%T %v", constant, constant)
+
 	indexable := true
 	hash := constant
 	switch reflect.TypeOf(constant).Kind() {
@@ -172,6 +180,7 @@ func (c *compiler) addConstant(constant any) int {
 		//	- 复杂类型 %v 格式化可能无法保证唯一，如 map
 		//  - 复杂类型 %v 格式化开销很大，不格式化也只是浪费些空间，trade off
 		indexable = false
+		c.logf("[CONST] Non-indexable type: %T", constant)
 	}
 
 	// 有两个 Struct 特殊处理下。
@@ -182,16 +191,19 @@ func (c *compiler) addConstant(constant any) int {
 	if field, ok := constant.(*runtime.Field); ok {
 		indexable = true
 		hash = fmt.Sprintf("%v", field)
+		c.logf("[CONST] Special case *runtime.Field, key=%v", hash)
 	}
 	if method, ok := constant.(*runtime.Method); ok {
 		indexable = true
 		hash = fmt.Sprintf("%v", method)
+		c.logf("[CONST] Special case *runtime.Method, key=%v", hash)
 	}
 
 	// 对于可比较的对象，如果常量已存在，直接返回，避免重复插入；
 	// 对不可比较的对象，不判重，直接插入到常量池中；
 	if indexable {
 		if p, ok := c.constantsIndex[hash]; ok {
+			c.logf("[CONST] Constant already exists at index %d", p)
 			return p
 		}
 	}
@@ -201,6 +213,9 @@ func (c *compiler) addConstant(constant any) int {
 	p := len(c.constants) - 1
 	if indexable {
 		c.constantsIndex[hash] = p
+		c.logf("[CONST] Inserted indexable constant at %d with key %v", p, hash)
+	} else {
+		c.logf("[CONST] Inserted non-indexable constant at %d", p)
 	}
 
 	// 返回编号
@@ -236,12 +251,14 @@ func (c *compiler) addFunction(name string, fn Function) int {
 		panic("function is nil")
 	}
 	if p, ok := c.functionsIndex[name]; ok {
+		c.logf("[FUNCTION] Reuse function: name=%q, index=%d", name, p)
 		return p
 	}
 	p := len(c.functions)
 	c.functions = append(c.functions, fn)
 	c.functionsIndex[name] = p
 	c.debugInfo[fmt.Sprintf("func_%d", p)] = name // 记录调试信息 <func_no, func_name>
+	c.logf("[FUNCTION] Add function: name=%q, index=%d, address=%p", name, p, fn)
 	return p
 }
 
@@ -254,7 +271,19 @@ func (c *compiler) calcBackwardJump(to int) int {
 	return len(c.bytecode) + 1 - to
 }
 
+func (c *compiler) logf(format string, args ...interface{}) {
+	indent := strings.Repeat(" ", (c.compileDepth-1)*4)
+	log.Printf(indent+format, args...)
+}
+
 func (c *compiler) compile(node ast.Node) {
+	c.compileDepth++
+	c.logf("[COMPILE] ➜ start node=%T: %s", node, node.String())
+	defer func() {
+		c.logf("[COMPILE] ⇠ done  node=%T", node)
+		c.compileDepth--
+	}()
+
 	c.nodes = append(c.nodes, node)
 	defer func() {
 		c.nodes = c.nodes[:len(c.nodes)-1]
@@ -370,6 +399,8 @@ func (c *compiler) IdentifierNode(node *ast.IdentifierNode) {
 
 func (c *compiler) IntegerNode(node *ast.IntegerNode) {
 	t := node.Type()
+	c.logf("[COMPILE] IntegerNode type is %v", t)
+
 	if t == nil {
 		c.emitPush(node.Value)
 		return
@@ -1352,4 +1383,47 @@ func kind(t reflect.Type) reflect.Kind {
 		return reflect.Invalid
 	}
 	return t.Kind()
+}
+
+func (c *compiler) dump() {
+	fmt.Println("====== [COMPILER DUMP] ======")
+
+	// 打印 Bytecode + Arguments + 源码位置信息
+	for i, op := range c.bytecode {
+		arg := 0
+		if i < len(c.arguments) {
+			arg = c.arguments[i]
+		}
+		loc := ""
+		if i < len(c.locations) {
+			loc = c.locations[i].String()
+		}
+		fmt.Printf("[%-3d] %-20s arg=%-5d loc=%s", i, op.String(), arg, loc)
+		fmt.Println()
+	}
+
+	// 打印常量池
+	fmt.Println("\n[Constants]")
+	for i, v := range c.constants {
+		fmt.Printf("  #%d: %T = %v", i, v, v)
+		fmt.Println()
+	}
+
+	// 打印函数池
+	fmt.Println("\n[Functions]")
+	for i, fn := range c.functions {
+		fmt.Printf("  #%d: %T at %p", i, fn, fn)
+		fmt.Println()
+	}
+
+	// 打印链结构（用于 ChainNode）
+	if len(c.chains) > 0 {
+		fmt.Println("\n[Chains]")
+		for i, chain := range c.chains {
+			fmt.Printf("  Chain[%d]: %v", i, chain)
+			fmt.Println()
+		}
+	}
+
+	fmt.Println("====== [END DUMP] ======")
 }
