@@ -364,8 +364,10 @@ func (c *compiler) NilNode(_ *ast.NilNode) {
 	c.emit(OpNil)
 }
 
-// IdentifierNode 将 AST 中的 Identifier 转换成对应的 bytecode（加载变量、字段、方法、常量等）。
-// IdentifierNode 体现了编译器的 “多源绑定” 能力：变量名既可能来自本地作用域，也可能来自运行环境，还可能是静态常量。
+// IdentifierNode
+//
+// 根据标识符的不同来源（局部变量、特殊变量、环境字段、环境方法或常量）生成相应的加载操作码。
+// 体现了编译器的 “多源绑定” 能力：标识符既可能来自本地作用域，也可能来自运行环境，还可能是静态常量。
 //
 // 步骤：
 //  1. 检查标识符是否是局部变量（函数参数、let 声明等），生成 OpLoadVar 操作码，并传入变量索引，然后返回。
@@ -379,6 +381,7 @@ func (c *compiler) NilNode(_ *ast.NilNode) {
 //
 // 表格：
 //
+//	| ----- | -------------------------- | -------------- | ----------------   |
 //	| 优先级 | 判断条件                    | 发射指令        | 含义                 |
 //	| ----- | -------------------------- | -------------- | ----------------   |
 //	|   1   | 本地作用域有此变量            | `OpLoadVar`    | 从局部变量栈加载      |
@@ -387,6 +390,7 @@ func (c *compiler) NilNode(_ *ast.NilNode) {
 //	|   4   | `env` 是 struct 且匹配字段   | `OpLoadField`  | 反射加载字段          |
 //	|   5   | `env` 是 struct 且匹配方法   | `OpLoadMethod` | 反射加载方法         |
 //	|   6   | 全都不匹配，回退为字符串常量    | `OpLoadConst`  | 当成普通字符串常量处理 |
+//	| ----- | -------------------------- | -------------- | ----------------   |
 func (c *compiler) IdentifierNode(node *ast.IdentifierNode) {
 	if index, ok := c.lookupVariable(node.Value); ok {
 		c.emit(OpLoadVar, index)
@@ -418,6 +422,18 @@ func (c *compiler) IdentifierNode(node *ast.IdentifierNode) {
 		c.emit(OpLoadConst, c.addConstant(node.Value))
 	}
 }
+
+// IntegerNode
+// 根据整数节点的类型和值生成相应的操作码（OpCode）
+//
+//
+// 如果节点没有指定类型，直接按原始值处理，否则按目标类型转换、范围检查后再输出；
+//
+// 	[类型分类]	[检查规则]					[说明]
+//	有符号整数	int, int8, int16, ...		检查上/下限
+//	无符号整数	uint, uint8, ...			需判断非负 + 上限
+//	浮点数		float32, float64			直接转换（无上限检查）
+//	未指定		nil 或未知类型				不转换，直接存原始 int
 
 func (c *compiler) IntegerNode(node *ast.IntegerNode) {
 	t := node.Type()
@@ -513,26 +529,57 @@ func (c *compiler) ConstantNode(node *ast.ConstantNode) {
 	c.emitPush(node.Value)
 }
 
+// UnaryNode 将表达式中的一元运算（如 -a, !b, +c）转成对应的字节码指令，行为如下：
+//   - 递归编译其操作数（node.Node）
+//   - 发射一元操作指令
+//
+// Q: 这里为什么要 deref ?
+//
+// 假设有结构定义：
+//
+//	type Env struct {
+//		A *int          // 指针
+//	}
+//
+// 例一：expr: -A
+//
+// 流程：
+//   - compile(A) → 加载变量 A → 得到 *int（指针）
+//   - derefInNeeded(A) → 发现 A 是 *int，需要解引用 → emit OpDeref
+//   - 发射 OpNegate
+//
+// 字节码：
+//   - OpLoadField("A")
+//   - OpDeref
+//   - OpNegate
 func (c *compiler) UnaryNode(node *ast.UnaryNode) {
 	c.compile(node.Node)
 	c.derefInNeeded(node.Node)
 
 	switch node.Operator {
-
 	case "!", "not":
 		c.emit(OpNot)
-
 	case "+":
 		// Do nothing
-
 	case "-":
 		c.emit(OpNegate)
-
 	default:
 		panic(fmt.Sprintf("unknown operator (%v)", node.Operator))
 	}
 }
 
+// BinaryNode 将表达式中的二元运算转成对应的字节码指令
+//
+// 二元运算：
+//   - 比较（==, !=, >, <, >=, <=）
+//   - 算术（+, -, *, /, %, **）
+//   - 逻辑运算（and/or/??）
+//   - 模式匹配、包含等特殊操作
+//
+// 编译过程：
+//   - 递归编译左、右表达式
+//   - 判断是否需要解引用
+//   - 发射特定字节码指令
 func (c *compiler) BinaryNode(node *ast.BinaryNode) {
 	switch node.Operator {
 	case "==":
