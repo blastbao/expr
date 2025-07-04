@@ -134,7 +134,7 @@ func (c *compiler) nodeParent() ast.Node {
 func (c *compiler) emitLocation(loc file.Location, op Opcode, arg int) int {
 	c.bytecode = append(c.bytecode, op)    // 添加操作码
 	current := len(c.bytecode)             // 获取指令地址
-	c.arguments = append(c.arguments, arg) // 添加参数数目
+	c.arguments = append(c.arguments, arg) // 添加参数
 	c.locations = append(c.locations, loc) // 添加源码位置
 	return current                         // 返回指令地址（可以用于跳转、回填等用途）
 }
@@ -580,6 +580,12 @@ func (c *compiler) UnaryNode(node *ast.UnaryNode) {
 //   - 递归编译左、右表达式
 //   - 判断是否需要解引用
 //   - 发射特定字节码指令
+//
+// 在布尔逻辑中，表达式 a || b 的值由以下规则决定：
+//   - 如果 a 为真，就不再计算 b，直接返回 a 的结果
+//   - 如果 a 为假，才计算 b 并返回其结果
+//
+// 这种行为叫做 “短路” 。
 func (c *compiler) BinaryNode(node *ast.BinaryNode) {
 	switch node.Operator {
 	case "==":
@@ -590,14 +596,22 @@ func (c *compiler) BinaryNode(node *ast.BinaryNode) {
 		c.emit(OpNot)
 
 	case "or", "||":
+		// 编译左子式
 		c.compile(node.Left)
 		c.derefInNeeded(node.Left)
+		// OpJumpIfTrue：条件跳转指令
+		//	检查栈顶值：
+		//	 - 如果为 true，跳转到 end（短路求值，直接返回 true）。
+		//	 - 如果为 false，继续执行。
+		// placeholder：跳转地址，暂时未知，稍后通过 patchJump 修补。
 		end := c.emit(OpJumpIfTrue, placeholder)
+		// 只有左子式为 false 时才会执行到这里，此时左子式值已然不重要，直接弹出
 		c.emit(OpPop)
+		// 编译右子式
 		c.compile(node.Right)
 		c.derefInNeeded(node.Right)
+		// 将之前 OpJumpIfTrue 的跳转地址修正为当前指令位置
 		c.patchJump(end)
-
 	case "and", "&&":
 		c.compile(node.Left)
 		c.derefInNeeded(node.Left)
@@ -685,6 +699,9 @@ func (c *compiler) BinaryNode(node *ast.BinaryNode) {
 		c.emit(OpIn)
 
 	case "matches":
+		// matches 用于判断左侧字符串是否匹配右侧的正则表达式。
+		//	- 当右侧是字符串常量时（如 s matches "^[a-z]+$"），在编译时编译正则表达式存入常量池，通过索引引用，避免重复开销。
+		//	- 当右侧是变量或表达式时（如 s matches RegexVar），在运行时计算右侧表达式得到正则字符串，将其动态编译为正则对象后，再执行匹配。
 		if str, ok := node.Right.(*ast.StringNode); ok {
 			re, err := regexp.Compile(str.Value)
 			if err != nil {
@@ -730,6 +747,10 @@ func (c *compiler) BinaryNode(node *ast.BinaryNode) {
 		c.emit(OpRange)
 
 	case "??":
+		// 同 or 类似，如果左操作数不是 nil，则返回左操作数；否则返回右操作数。
+		//  - port := config.port ?? 8080
+		//  - name := user.nickname ?? user.username
+		//  - value := cachedValue ?? computeValue()
 		c.compile(node.Left)
 		c.derefInNeeded(node.Left)
 		end := c.emit(OpJumpIfNotNil, placeholder)
@@ -740,27 +761,22 @@ func (c *compiler) BinaryNode(node *ast.BinaryNode) {
 
 	default:
 		panic(fmt.Sprintf("unknown operator (%v)", node.Operator))
-
 	}
 }
 
 func (c *compiler) equalBinaryNode(node *ast.BinaryNode) {
-	// 获取左右操作数的类型
-	l := kind(node.Left.Type())
-	r := kind(node.Right.Type())
-
-	// 检查是否为简单类型
-	leftIsSimple := isSimpleType(node.Left)
-	rightIsSimple := isSimpleType(node.Right)
-	leftAndRightAreSimple := leftIsSimple && rightIsSimple
-
-	// 编译左右操作数
 	c.compile(node.Left)
 	c.derefInNeeded(node.Left)
 	c.compile(node.Right)
 	c.derefInNeeded(node.Right)
 
-	// 根据类型生成特化指令
+	l := kind(node.Left.Type())
+	r := kind(node.Right.Type())
+
+	leftIsSimple := isSimpleType(node.Left)
+	rightIsSimple := isSimpleType(node.Right)
+	leftAndRightAreSimple := leftIsSimple && rightIsSimple
+
 	if l == r && l == reflect.Int && leftAndRightAreSimple {
 		c.emit(OpEqualInt)
 	} else if l == r && l == reflect.String && leftAndRightAreSimple {
