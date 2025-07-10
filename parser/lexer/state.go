@@ -189,18 +189,22 @@ func not(l *lexer) stateFn {
 }
 
 func questionMark(l *lexer) stateFn {
+	// 检查下一个字符是否为 . 或 ? ，若是则 accept ，否则回退（忽略刚刚读的下一个字符）
 	l.accept(".?")
 	l.emit(Operator)
 	return root
 }
 
 func slash(l *lexer) stateFn {
+	// 如果下一个字符是 "/" ，则当前 word 为 "//" ，意味着后续字符串（截至eof或者'\n')为注释，可直接忽略
 	if l.accept("/") {
 		return singleLineComment
 	}
+	// 如果下一个字符是 "*" ，则当前 word 为 "/*" ，意味着后续字符串（截至"*/")为注释，可直接忽略
 	if l.accept("*") {
 		return multiLineComment
 	}
+	// 否则，直接当作操作符发射
 	l.emit(Operator)
 	return root
 }

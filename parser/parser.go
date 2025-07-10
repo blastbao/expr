@@ -789,6 +789,23 @@ func (p *parser) parseCall(token Token, arguments []Node, checkOverrides bool) N
 	return node
 }
 
+// parseArguments 解析函数或方法调用中的实参列表。它从输入流中逐个读取参数，并处理逗号分隔和括号匹配。
+//
+// 1. 记录已有参数的数量 offset ，用于判断是否需要解析 ',' 分隔符;
+// 2. 要求当前 token 是左括号 '(' , 只要还没遇到 ')' 且没有语法错误，就不断解析参数;
+// 3. 若已经解析了一个或多个参数，解析后续参数前必须看到逗号 ',' ，读取完 ',' 如果紧接着是 ')' ，直接跳出循环，不用等到下次 loop ;
+// 4. 解析参数表达式并添加到 args 中;
+// 5. 参数列表以 ')' 结尾;
+//
+// 例子：
+//
+//	f(1, x + 2, "hi")
+//
+//	args = [
+//	  Node(IntLiteral(1)),
+//	  Node(BinaryExpr(x, +, 2)),
+//	  Node(StringLiteral("hi"))
+//	]
 func (p *parser) parseArguments(arguments []Node) []Node {
 	// If pipe operator is used, the first argument is the left-hand side
 	// of the operator, so we do not parse it as an argument inside brackets.
@@ -810,6 +827,76 @@ func (p *parser) parseArguments(arguments []Node) []Node {
 	return arguments
 }
 
+// 谓词（Predicate） 在编程语言和计算机科学中，指的是一个 返回布尔值（true/false）的表达式或函数，用于表示逻辑条件或状态判断。
+// 它的核心作用是 对数据进行筛选、验证或控制流程。
+//
+// 应用场景：
+//	场景			示例								作用
+//	条件语句		if (predicate) { ... }			控制代码分支执行。
+//	循环控制		while (predicate) { ... }		决定是否继续循环。
+//	数据过滤		list.Where(predicate)			筛选集合中满足条件的元素。
+//	断言/验证	assert(predicate, "error")		检查程序状态是否合法。
+//
+// 谓词 vs 普通表达式
+//	特性			谓词					普通表达式
+//	返回值		必须为 true/false	可以是任意类型
+//	用途			逻辑判断				计算或生成值
+//	示例			x > 0				x + 1
+//
+// 谓词和 bool 表达式有啥区别？
+//  谓词是 逻辑层面的概念（描述“是否符合条件”）。
+//	布尔表达式是 语法层面的代码片段（由运算符和变量组成）。
+//	所有布尔表达式都可以当作谓词使用；但不是所有谓词都是纯布尔表达式（有的可能有副作用或是多语句）。
+//
+// 	概念			谓词（Predicate）						布尔表达式（Boolean Expression）
+//	本质			一种返回布尔值的函数或表达式					一个计算结果为布尔类型的表达式
+//	作用			用于过滤、判断、条件执行等场景				用于控制流程或条件语句
+//	示例			x -> x > 10、filter { x > 10 }			x > 10、a && b、!flag
+//	抽象程度		是“函数”意义上的判断逻辑					是具体计算的布尔值
+//	表达形式		可以是代码块 { ... }，有时支持赋值等副作用	纯粹的表达式，无副作用
+
+// 过程：
+//
+// 检查是否用花括号包裹，若是则将 withBrackets 置为 true ，例如：
+//   - { age > 18 } → withBrackets = true。
+//   - x > 0 → withBrackets = false。
+//
+// 递增 p.depth ，控制递归深度，避免栈溢出（如嵌套过深的表达式）。
+// 解析表达式
+//   - parseSequenceExpression：解析 {} 内的多个语句，如 { a > 1; b < 2 }。
+//   - parseExpression(0)：解析单条表达式，如 x > 0，优先级为 0 ；在无花括号时，遇到分号会报错，要求强制使用 {} 包裹多条语句。
+//
+// 如果存在 { 必须匹配 }，否则语法错误。
+// 根据解析结果构造谓词节点 PredicateNode ，其子节点是刚刚解析出来的表达式 node，保留源码位置信息。
+
+// 示例1：单表达式谓词
+//
+//	if x > 0 { ... }
+//
+// 流程：
+//
+//   - 设置 withBrackets = false。
+//   - 调用 parseExpression(0) 解析 x > 0。
+//   - 返回 PredicateNode{Node: BinaryNode(">", x, 0)}。
+//
+// 示例2：多语句谓词
+//
+//	where { age > 18; name != "" }
+//
+// 流程：
+//
+//   - 遇到 { ，设置 withBrackets = true 。
+//   - 调用 parseSequenceExpression() 解析 age > 18; name != "" 。
+//   - 检查闭合 } 。
+//   - 返回 PredicateNode{Node: SequenceNode[...]}。
+//
+// 示例3：错误情况
+//
+//	if x > 0; { ... }
+//
+// 流程：
+//
+//   - 触发错误 "wrap predicate with brackets { and }"。
 func (p *parser) parsePredicate() Node {
 	startToken := p.current
 	withBrackets := false
@@ -842,6 +929,35 @@ func (p *parser) parsePredicate() Node {
 	return predicateNode
 }
 
+// 解析数组表达式，将类似 [1, "a", x + 2] 的代码转换为抽象语法树中的 ArrayNode 。
+//
+// 初始化一个空的节点列表，将要解析的每个表达式（如 1, 2+3, x>5）都作为子节点存在这个列表中。
+// 匹配开头的左中括号 [ ，随后一直解析，直到遇到右中括号 ] 或发生错误。
+// 如果不是第一个元素，需要有 , 分隔；如果 , 后紧跟 ]（即 [1,2,] 这种尾逗号），则直接结束（进入 end: 标签）。
+// 使用 parseExpression(0) 解析当前的数组项。
+// 结束时必须匹配一个 ]，否则记录错误。
+// 创建 ArrayNode 节点，其包含所有子节点，位置取自开头的 token，用于报错时指出“这个数组是从哪里开始的”。
+//
+// 示例：
+//
+//	[1, 2+3, x > 5]
+//
+//	&ArrayNode{
+//	 Nodes: []Node{
+//	   IntNode(1),
+//	   BinaryNode(2, '+', 3),
+//	   BinaryNode(x, '>', 5),
+//	 }
+//	}
+//
+// 边界情况处理：
+//
+//	场景				行为
+//	空数组 []		不进入循环，直接返回空的 ArrayNode。
+//	末尾逗号 [1,]	goto end 跳过逗号后的元素解析。
+//	缺失逗号 [1 2]	expect(Operator, ",") 抛出语法错误。
+//	嵌套数组 [[1]]	parseExpression(0) 递归解析内部数组。
+
 func (p *parser) parseArrayExpression(token Token) Node {
 	nodes := make([]Node, 0)
 
@@ -866,11 +982,47 @@ end:
 	return node
 }
 
+// parseMapExpression 解析 Map 表达式，将 { "a": 1, b: 2, (x + 1): 3 } 转换为 AST 中的 MapNode 。
+//
+// 步骤:
+// 初始化节点列表 nodes 用来存放 kv 对。
+// 匹配开头的左大括号 { ，随后一直解析，直到遇到右大括号 } 或发生错误。
+// 如果不是第一个 kv 对，需要有 , 分隔；如果 , 后紧跟 }（即 {1:2,} 这种尾逗号），则直接结束（进入 end: 标签）；遇到连续的 ,, 如 {a:1,,b:2} 则报错。
+// 循环解析每个 kv 对：
+//   - 解析 key，可以是数字、字符串、标识符，或一个完整表达式
+//   - 解析冒号
+//   - 解析 value 表达式
+//
+// 构造 PairNode 并加入 nodes 列表。
+// 结束时必须匹配一个 }，否则报错。
+// 构造 MapNode 并返回。
+//
+// 示例
+//
+//	{a: 1, "b": 2+3, (1+2): x}
+//
+//	&MapNode{
+//	 Pairs: []Node{
+//	   &PairNode{Key: StringNode("a"), Value: IntNode(1)},
+//	   &PairNode{Key: StringNode("b"), Value: BinaryNode(2, '+', 3)},
+//	   &PairNode{Key: BinaryNode(1, '+', 2), Value: IdentifierNode("x")},
+//	 },
+//	}
+//
+// 边界情况
+//
+//	场景					行为
+//	空 Map {}			不进入循环，直接返回空的 MapNode。
+//	末尾逗号 {a:1,}		goto end 跳过逗号。
+//	非法 Key				报错。
+//	缺失冒号 {a 1}		expect(Operator, ":") 抛出语法错误。
+//	嵌套 Map				递归解析内部 Map（如 {a: {b: 2}}）。
 func (p *parser) parseMapExpression(token Token) Node {
-	p.expect(Bracket, "{")
-
 	nodes := make([]Node, 0)
+
+	p.expect(Bracket, "{")
 	for !p.current.Is(Bracket, "}") && p.err == nil {
+
 		if len(nodes) > 0 {
 			p.expect(Operator, ",")
 			if p.current.Is(Bracket, "}") {
@@ -919,10 +1071,11 @@ end:
 	return node
 }
 
-func (p *parser) parsePostfixExpression(node Node) Node {
+func (p *parser) parsePostfixExpressionOrigin(node Node) Node {
 	postfixToken := p.current
 	for (postfixToken.Is(Operator) || postfixToken.Is(Bracket)) && p.err == nil {
 		optional := postfixToken.Value == "?."
+
 	parseToken:
 		if postfixToken.Value == "." || postfixToken.Value == "?." {
 			p.next()
@@ -1043,6 +1196,309 @@ func (p *parser) parsePostfixExpression(node Node) Node {
 				}
 			}
 		} else {
+			break
+		}
+		postfixToken = p.current
+	}
+	return node
+}
+
+// parsePostfixExpression 解析后缀表达式（Postfix Expression），处理如属性访问、方法调用、数组切片等操作。
+//
+// 主表达式后面可能跟随后缀（属性访问、索引、函数调用、数组切片等）。
+// 此函数负责不断地处理它们，把它们挂在原始的表达式 node 上，直到不再是后缀为止。
+//
+//	foo.bar            // 属性访问
+//	foo?.bar           // 可选链访问
+//	foo.bar()          // 方法调用
+//	foo["bar"]         // 索引访问
+//	foo?.["bar"]       // 可选链 + 索引
+//	foo[1:3]           // 切片访问
+//	foo[:3], foo[1:], foo[:]  // 各种形式的切片
+//
+// 如果当前 token 是操作符（.、?.）或方括号（[），就可能是个后缀表达式，就要处理。
+//
+//  1. 如果当前 token 是 . 或 ?. ，意味着是成员访问或方法调用，如 foo.bar, foo.bar(), foo?.bar, foo?.bar(), foo?.["bar"] ；
+//     处理步骤：
+//     - 跳过 . 或 ?.
+//     - 读取下一个 token 应该是属性名（Identifier 或合法操作符）
+//     - 构造 MemberNode（表示属性访问），设置 Optional 标志
+//     - 如果接着是 ( 表示方法调用，就包装成 CallNode
+//     - 如果是可选链或已有链式调用，会包一层 ChainNode
+//
+//  2. 如果当前 token 是 [ ，意味着索引或切片访问
+//     处理步骤：
+//
+//     - 跳过 [
+//     - 看是否是切片还是普通访问：
+//     - : 开头：没有 from，只有 to
+//     - from : to：典型切片
+//     - 没有 :：普通索引访问（对应 MemberNode）
+//     - 对于可选链 ?.[x] 也正确处理
+//     - 构造 SliceNode 或 MemberNode
+//
+// 成员访问（. 和 ?. 操作符）
+//   - 处理对象属性访问（obj.property）
+//   - 处理可选链（obj?.property）
+//   - 处理方法调用（obj.method()）
+//
+// 数组索引/切片（[] 操作符）
+//   - 处理简单索引（array[0]）
+//   - 处理切片操作（array[1:3], array[:3], array[1:]）
+//
+// [重要]
+// 所有包含 ?. 的操作都会最终生成一个 ChainNode ，不管 ?. 出现在访问链的哪个位置，只要出现一次 ?. 整条链都会被包装在一个 ChainNode 中，以支持「短路」语义。
+//
+// 例子：
+//
+//	obj?.a
+//	ChainNode{
+//		Node: MemberNode{
+//		   Node:     obj,
+//		   Property: "a",
+//		   Optional: true,  // 表示 `?.` 语法
+//		},
+//	}
+//
+//	obj?.a?.b
+//	ChainNode{
+//	   Node: MemberNode{
+//	       Node: MemberNode{
+//	           Node:     obj,
+//	           Property: "a",
+//	           Optional: true, // `?.`
+//	       },
+//	       Property: "b",
+//	       Optional: true,  // `?.`
+//	   },
+//	}
+//
+//	obj.a?.b
+//	ChainNode{
+//	   Node: MemberNode{
+//	       Node: MemberNode{
+//	           Node:     obj,
+//	           Property: "a",
+//	           Optional: false,  // 普通 `.` 访问
+//	       },
+//	       Property: "b",
+//	       Optional: true,       // `?.`
+//	   },
+//	}
+//
+//	obj.a.b?.c
+//	ChainNode {
+//		Node: MemberNode { // .c
+//	   		Node: MemberNode { // obj.a.b
+//	     		Node: MemberNode {  // obj.a
+//	       			Node: IdentifierNode("obj"),
+//	       			Property: "a",
+//	       			Optional: false
+//	     		},
+//	     		Property: "b",
+//	     		Optional: false
+//	   		},
+//	   		Property: "c",
+//	   		Optional: true // `?.`
+//	 	}
+//	}
+//
+// Q: 为什么 ?. 之前的也被包进 ChainNode 来了，它不是只短路后续的访问吗？
+// A:
+//
+//	ChainNode 会包裹整个链，但只有紧跟 ?. 的 MemberNode 会将 Optional 标记为 true。
+//	即使 ?. 出现在链的中间位置（如 a.b?.c.d），整个链都需要知道前面的操作是可选的。
+//	ChainNode 包裹整个链能确保可选性传递到后续所有操作。
+//
+// Q: 对于 user.address.city 这种，也会生成 chain 吗？
+// A:
+//
+//	对于 user.address.city 这种连续的普通属性访问（没有 ?. 操作符），不会生成 ChainNode。
+//	它的 AST 结构是简单的嵌套 MemberNode，没有任何短路逻辑。
+//
+//	MemberNode {
+//	   Node: MemberNode {
+//	       Node:     Identifier("user"),   // 根对象
+//	       Property: "address",            // 第一层属性
+//	       Optional: false,                // 普通访问（非可选链）
+//	   },
+//	   Property: "city",                   // 第二层属性
+//	   Optional: false,                    // 普通访问（非可选链）
+//	}
+//
+// 普通链式访问的执行逻辑是直接的：每个属性访问步骤都假设前一个值存在，如果不存在则抛出错误。这种情况下，不需要额外的节点来处理短路逻辑，因此 AST 结构更简单。
+// 只有当表达式中包含 ?. 时，才需要 ChainNode 来实现短路语义，即在遇到 nil 时提前返回 nil 而不是继续执行。
+//
+// [重要]
+// 当左侧已经是 ChainNode 时，需要：
+//   - 解包：取出内部节点以继续构建链
+//   - 构建新节点：使用解包后的节点作为基础
+//   - 重新封装：如果原始链存在可选性，确保整个链被 ChainNode 包裹
+//
+// 举例：
+// 示例 1：obj?.a.b
+// 解析
+//  1. obj?.a → ChainNode(MemberNode(obj, a, true))
+//  2. 遇到 .b，解包 ChainNode，取出 MemberNode(obj, a, true)
+//  3. 创建新 MemberNode(MemberNode(obj, a, true), b, false)
+//  4. 重新封装为 ChainNode(MemberNode(MemberNode(obj, a, true), b, false))
+//
+// 示例 2：obj.a?.b
+// 解析
+//  1. obj.a → MemberNode(obj, a, false)
+//  2. 遇到 ?.b，创建 MemberNode(MemberNode(obj, a, false), b, true)
+//  3. 封装为 ChainNode(MemberNode(MemberNode(obj, a), b))
+//
+// /
+func (p *parser) parsePostfixExpression(node Node) Node {
+	postfixToken := p.current
+
+	// 循环检查当前 token 是否是操作符或括号（如 .、?.、[），如果是，就继续解析，直到遇到非后缀操作符或者出错为止。
+	for (postfixToken.Is(Operator) || postfixToken.Is(Bracket)) && p.err == nil {
+		optional := postfixToken.Value == "?."
+
+	parseToken:
+		// 处理形如 obj.prop 或 obj?.prop 的表达式
+		if postfixToken.Value == "." || postfixToken.Value == "?." {
+			p.next() // 跳过当前 . 或 ?. ，读取下一个 token
+
+			// 保存当前 token
+			propertyToken := p.current
+			// 如果当前字符是 [ ，意味着解析到 ?.[ ，需按照索引访问方式来解析
+			if optional && propertyToken.Is(Bracket, "[") { // 形如 foo?.["bar"]
+				postfixToken = propertyToken
+				goto parseToken
+			}
+
+			// 跳过当前 token
+			p.next()
+
+			// 检查 propertyToken 是否是一个合法的属性名或方法名，确保跟在点操作符（. 或 ?.）后面的名称是有效的。
+			//
+			// 只有两类 token 可以作为属性名或方法名：
+			//	- 普通标识符（变量名、字段名）
+			//	- 部分操作符（如 not、matches），满足 IsValidIdentifier
+			//
+			// 示例：
+			//	- obj.name     // "name" 是 Identifier
+			//  - obj.not      // "not" 是 Operator，但允许作为方法名
+			//	- obj.matches  // "matches" 是 Operator
+			//  - obj.+        // "+" 是 Operator ，但不允许作为属性名 → 报错
+			//  - obj.123      // 数字，不是合法标识符 → 报错
+			//  - obj.@name    // 非法标识符 → 报错
+			if propertyToken.Kind != Identifier &&
+				// Operators like "not" and "matches" are valid methods or property names.
+				(propertyToken.Kind != Operator || !utils.IsValidIdentifier(propertyToken.Value)) {
+				p.error("expected name")
+			}
+
+			// 将属性名或方法名包装成 StringNode，用于后续构建 MemberNode。
+			property := p.createNode(&StringNode{Value: propertyToken.Value}, propertyToken.Location)
+			if property == nil {
+				return nil
+			}
+
+			// 如果左侧已经是 ChainNode（如 obj?.a.b 中的 obj?.），则提取它的底层节点 Node（即 obj，可能是 MemberNode 或 IdentifierNode）。
+			chainNode, isChain := node.(*ChainNode)
+			optional := postfixToken.Value == "?."
+			if isChain {
+				node = chainNode.Node
+			}
+
+			// 创建 MemberNode，表示属性访问（如 obj.a 或 obj?.a）。
+			memberNode := p.createMemberNode(&MemberNode{
+				Node:     node,
+				Property: property,
+				Optional: optional,
+			}, propertyToken.Location)
+			if memberNode == nil {
+				return nil
+			}
+
+			if p.current.Is(Bracket, "(") {
+				memberNode.Method = true
+				node = p.createNode(&CallNode{
+					Callee:    memberNode,
+					Arguments: p.parseArguments([]Node{}),
+				}, propertyToken.Location)
+				if node == nil {
+					return nil
+				}
+			} else {
+				node = memberNode
+			}
+
+			if isChain || optional {
+				node = p.createNode(&ChainNode{Node: node}, propertyToken.Location)
+				if node == nil {
+					return nil
+				}
+			}
+
+		} else if postfixToken.Value == "[" {
+			p.next()
+
+			var from, to Node
+
+			if p.current.Is(Operator, ":") { // slice without from [:1]
+				p.next()
+
+				if !p.current.Is(Bracket, "]") { // slice without from and to [:]
+					to = p.parseExpression(0)
+				}
+
+				node = p.createNode(&SliceNode{
+					Node: node,
+					To:   to,
+				}, postfixToken.Location)
+				if node == nil {
+					return nil
+				}
+				p.expect(Bracket, "]")
+
+			} else {
+
+				from = p.parseExpression(0)
+
+				if p.current.Is(Operator, ":") {
+					p.next()
+
+					if !p.current.Is(Bracket, "]") { // slice without to [1:]
+						to = p.parseExpression(0)
+					}
+
+					node = p.createNode(&SliceNode{
+						Node: node,
+						From: from,
+						To:   to,
+					}, postfixToken.Location)
+					if node == nil {
+						return nil
+					}
+					p.expect(Bracket, "]")
+
+				} else {
+					// Slice operator [:] was not found,
+					// it should be just an index node.
+					node = p.createNode(&MemberNode{
+						Node:     node,
+						Property: from,
+						Optional: optional,
+					}, postfixToken.Location)
+					if node == nil {
+						return nil
+					}
+					if optional {
+						node = p.createNode(&ChainNode{Node: node}, postfixToken.Location)
+						if node == nil {
+							return nil
+						}
+					}
+					p.expect(Bracket, "]")
+				}
+			}
+		} else {
+			// 如果当前 token 不是成员访问 `.` 或 `?.` ，或者数组访问 `[` ，则跳出循环
 			break
 		}
 		postfixToken = p.current

@@ -106,9 +106,12 @@ func (l *lexer) word() string {
 }
 
 func (l *lexer) accept(valid string) bool {
+	// 1) 读取下一个字符 r ，并移动 end++
+	// 2) 检查字符 r 是否存在于 valid 中
 	if strings.ContainsRune(valid, l.next()) {
 		return true
 	}
+	// 如果 r 不在 valid 中，回退 end--
 	l.backup()
 	return false
 }

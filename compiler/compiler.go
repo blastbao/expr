@@ -539,7 +539,9 @@ func (c *compiler) ConstantNode(node *ast.ConstantNode) {
 //		A *int          // 指针
 //	}
 //
-// 例一：expr: -A
+// 例一：
+//
+//	expr: -A
 //
 // 流程：
 //   - compile(A) → 加载变量 A → 得到 *int（指针）
@@ -862,6 +864,47 @@ func (c *compiler) ChainNode(node *ast.ChainNode) {
 // MemberNode 表示 访问某个对象的字段或属性，也就是 a.b 这种表达式。
 // 如果是 a.b()，可能会被视为 MethodNode。
 // a?.b 是可选成员访问，对应 node.Optional = true。
+
+// 设计思想:
+// 方法/字段分离：优先识别方法调用，剩余按字段处理。
+// 静态优化：合并多层静态字段访问为单次操作。
+// 动态兼容：支持运行时计算的属性名（如 obj[key]）。
+// 安全访问：通过 chains 机制实现可选链的短路逻辑。
+//
+//
+// 完整示例流程
+//
+// 场景：嵌套静态字段 a.b.c
+// 识别 a.b 和 c 均为静态字段。
+// 合并为 OpLoadField 指令，元数据包含路径 ["b", "c"]。
+//
+// 生成字节码：
+//  LOAD_VAR a
+//  OpLoadField <Field{Index: [0, 0], Path: ["b", "c"]}>
+//
+// 场景：动态属性 a[b]
+// 编译基值 a 和属性名表达式 b。
+// 生成 OpFetch 指令：
+//	LOAD_VAR a
+//	LOAD_VAR b
+//	OpFetch
+//
+//
+// 场景：可选链，user?.Address.City
+// 字节码：
+// 	LOAD_VAR user
+//	JUMP_IF_NIL end_chain     ; 可选链检查
+//	FETCH_FIELD {Index: [1, 3], Path: ["Address", "City"]}
+//	end_chain:
+//	...                       ; ChainNode 处理 nil
+//
+//
+//
+//	方法调用 (obj.Method)	生成 OpMethod 指令，附带方法元信息。
+//	嵌套字段 (a.b.c)			合并为单次 OpLoadField，索引和路径包含所有层级。
+//	可选链 (obj?.prop)		插入 OpJumpIfNil，由 ChainNode 处理 nil 情况。
+//	动态属性 (obj[prop])		编译属性名后生成 OpFetch。
+
 func (c *compiler) MemberNode(node *ast.MemberNode) {
 	// 编译器通过 env 分析用户传入的环境变量结构，用于检查是否可以静态识别出字段或方法。
 	var env Nature
@@ -892,15 +935,18 @@ func (c *compiler) MemberNode(node *ast.MemberNode) {
 	path := []string{nodeName}
 
 	if ok {
-		op = OpFetchField
+		// 将多层静态字段访问（如 a.b.c）合并为单次 OpLoadField。
+
+		op = OpFetchField // 标记为静态字段访问
 
 		// 尝试向上折叠字段路径（优化链式访问）
 		for !node.Optional {
+
 			// 非可选链时尝试嵌套优化，将多层静态字段访问（如 a.b.c）合并为单次 OpLoadField 。
 			//
 			// user.profile.email 会被优化为一个完整字段路径 [0,1,2]，直接生成一个 OpLoadField 指令，而不是多条逐级访问的 Fetch。
 
-			// 处理标识符（如 `obj` 在 `obj.sub.field`）
+			// 处理标识符（如 `field` 在 `obj.sub.field`）
 			if ident, isIdent := base.(*ast.IdentifierNode); isIdent {
 				if ok, identIndex, name := checker.FieldIndex(env, ident); ok {
 					index = append(identIndex, index...)   // 合并嵌套索引
@@ -912,7 +958,7 @@ func (c *compiler) MemberNode(node *ast.MemberNode) {
 				}
 			}
 
-			// 处理嵌套 MemberNode（如 `obj.sub` 在 `obj.sub.field`）
+			// 处理嵌套 MemberNode（如 `obj` 和 `sub` 在 `obj.sub.field`）
 			if member, isMember := base.(*ast.MemberNode); isMember {
 				if ok, memberIndex, name := checker.FieldIndex(env, member); ok {
 					index = append(memberIndex, index...)
@@ -976,9 +1022,7 @@ func (c *compiler) SliceNode(node *ast.SliceNode) {
 }
 
 func (c *compiler) CallNode(node *ast.CallNode) {
-
 	fn := node.Callee.Type()
-
 	if fn.Kind() == reflect.Func {
 
 		fnInOffset := 0
@@ -1416,7 +1460,7 @@ func (c *compiler) PointerNode(node *ast.PointerNode) {
 	}
 }
 
-// var x = 10; x + 5
+// let x = 10; x + 5
 //
 // Push 10     ; 入栈初始数值
 // Store 0     ; 存储到变量 0 ，即 x
