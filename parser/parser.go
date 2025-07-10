@@ -547,9 +547,10 @@ func (p *parser) parsePrimary() Node {
 	token := p.current
 
 	if token.Is(Operator) {
+		// 一元操作符：not、!、-、+
 		if op, ok := operator.Unary[token.Value]; ok {
-			p.next()
-			expr := p.parseExpression(op.Precedence)
+			p.next()                                 // 消耗操作符
+			expr := p.parseExpression(op.Precedence) // 解析右侧表达式
 			node := p.createNode(&UnaryNode{
 				Operator: token.Value,
 				Node:     expr,
@@ -557,24 +558,31 @@ func (p *parser) parsePrimary() Node {
 			if node == nil {
 				return nil
 			}
-			return p.parsePostfixExpression(node)
+			return p.parsePostfixExpression(node) // 处理后缀，形如 -x.y、-x[0]、-(a + b).foo
 		}
 	}
 
+	// 括号表达式
 	if token.Is(Bracket, "(") {
-		p.next()
-		expr := p.parseSequenceExpression()
-		p.expect(Bracket, ")") // "an opened parenthesis is not properly closed"
-		return p.parsePostfixExpression(expr)
+		p.next()                              // 跳过 `(`
+		expr := p.parseSequenceExpression()   // 解析括号内表达式
+		p.expect(Bracket, ")")                // 必须闭合
+		return p.parsePostfixExpression(expr) // 处理后缀（如 `(x + y).prop`）
 	}
 
-	if p.depth > 0 {
+	// 解析指针或引用
+	//	- 命名引用 "#var" 直接引用当前上下文的变量 var
+	//  - 匿名指针 "." 相当于 python 中的 self ，JS 中的 this 指针；
+	//
+	// 举例：
+	//	users | filter({ .age > 18 }) ，这里 .age 等价于 this.status 。
+	if p.depth > 0 { // 指针/引用通常用于局部上下文
 		if token.Is(Operator, "#") || token.Is(Operator, ".") {
 			name := ""
 			if token.Is(Operator, "#") {
 				p.next()
 				if p.current.Is(Identifier) {
-					name = p.current.Value
+					name = p.current.Value // 获取引用对象名
 					p.next()
 				}
 			}
@@ -582,28 +590,36 @@ func (p *parser) parsePrimary() Node {
 			if node == nil {
 				return nil
 			}
+			// 支持后缀访问，例如：#foo.bar
 			return p.parsePostfixExpression(node)
 		}
 	}
 
+	// 全局函数调用
+	// 场景：解析全局函数调用，如 ::format() 表示调用全局命名空间的 format 函数。
+	//
+	// 为什么需要这种设计？
+	//	- 命名空间隔离：避免局部变量或函数名与全局函数冲突。例如，即使存在局部变量 print，::print() 仍指向全局打印函数。
+	//	- 内置函数保护：确保核心内置函数不被意外覆盖。例如，::len() 始终调用内置的长度函数，即使代码中定义了同名变量。
+	//	- 代码可读性：明确标识函数的来源，使代码更易理解。例如，::math.sqrt(x) 清晰表明 sqrt 是全局数学库中的函数。
 	if token.Is(Operator, "::") {
-		p.next()
+		p.next() // 消耗 "::"
 		token = p.current
-		p.expect(Identifier)
+		p.expect(Identifier) // 确保 "::" 后是标识符，用作全局函数名
 		return p.parsePostfixExpression(p.parseCall(token, []Node{}, false))
 	}
 
+	// 如果以上都未匹配，则解析基础字面量
 	return p.parseSecondary()
 }
 
 func (p *parser) parseSecondary() Node {
 	var node Node
 	token := p.current
-
 	switch token.Kind {
-
 	case Identifier:
 		p.next()
+		// 如果标识符是一些特殊字面量，解析为对应的特殊类型节点；如果标识符后紧接着 ( ，解析为函数调用；否则，就是单纯一个标识符节点。
 		switch token.Value {
 		case "true":
 			node = p.createNode(&BoolNode{Value: true}, token.Location)
@@ -633,10 +649,9 @@ func (p *parser) parseSecondary() Node {
 				}
 			}
 		}
-
 	case Number:
 		p.next()
-		value := strings.Replace(token.Value, "_", "", -1)
+		value := strings.Replace(token.Value, "_", "", -1) // 移除数字分隔符，支持在数字中使用下划线（如 1_000_000）
 		var node Node
 		valueLower := strings.ToLower(value)
 		switch {
@@ -681,17 +696,24 @@ func (p *parser) parseSecondary() Node {
 		if node == nil {
 			return nil
 		}
-
 	default:
+		// 集合字面量
 		if token.Is(Bracket, "[") {
-			node = p.parseArrayExpression(token)
+			node = p.parseArrayExpression(token) // 数组，如 [1, 2, 3]
 		} else if token.Is(Bracket, "{") {
-			node = p.parseMapExpression(token)
+			node = p.parseMapExpression(token) // 映射，如 {"k": "v"}
 		} else {
-			p.error("unexpected token %v", token)
+			p.error("unexpected token %v", token) // 无法识别
 		}
 	}
 
+	// 除 Number 外，各种基本表达式解析完，都会调用 parsePostfixExpression 处理可能的后缀操作，如：
+	//	- 属性访问：obj.property
+	//  - 字段访问：obj["property"]
+	//	- 方法调用：obj.method()
+	//	- 索引访问：arr[0]
+	//	- 切片操作：arr[1:3]
+	//	- 可选链：obj?.property
 	return p.parsePostfixExpression(node)
 }
 
@@ -711,36 +733,59 @@ func (p *parser) toFloatNode(number float64) Node {
 	return p.createNode(&FloatNode{Value: number}, p.current.Location)
 }
 
+// 解析函数调用，支持三种调用类型：内置谓词（predicates）、内置函数（builtins） 和 普通函数调用；
+//
+// 内置谓词函数（如 filter、map、reduce）在解析器中有特殊处理逻辑，与普通函数调用不同。
+//  1. 严格的参数规则
+//     预定义谓词函数的参数类型和数量是固定的，参数可以是普通表达式、也可以是谓词；解析时会校验：
+//     - 必需参数：必须提供，否则报错。
+//     - 可选参数：可以省略。
+//     - 参数类型：区分表达式参数和谓词参数。
+//  2. 支持管道操作符 (|)
+//     预定义谓词函数支持管道语法，左侧数据隐式作为第一个参数（如 data | filter(...) 等价于 filter(data, ...)）。
+//     普通函数调用无法使用管道语法。
+//     data | filter(x -> x > 0) | map(x -> x * 2) 等价于 map(filter(data, x -> x > 0), x -> x * 2)
+//     str | contains "abc" 等价于 contains(str, "abc")
+//     users | filter(age > 18 && contains(name, "John")) 等价于 filter(users, (age > 18 && contains(name, "John"))
+//  3. 参数解析逻辑不同，谓词参数需要通过 parsePredicate 来解析，走特殊执行流程。
 func (p *parser) parseCall(token Token, arguments []Node, checkOverrides bool) Node {
 	var node Node
 
+	// 检查该函数是否被用户自定义实现覆盖，如果 checkOverrides 为 false，则不考虑覆盖。
 	isOverridden := false
 	if p.config != nil {
 		isOverridden = p.config.IsOverridden(token.Value)
 	}
 	isOverridden = isOverridden && checkOverrides
 
+	// 情况1：预定义谓词函数
 	if b, ok := predicates[token.Value]; ok && !isOverridden {
 		p.expect(Bracket, "(")
 
 		// In case of the pipe operator, the first argument is the left-hand side
 		// of the operator, so we do not parse it as an argument inside brackets.
+		//
+		// b.args 是 predicate 函数期望的参数类型列表，处理管道操作符时，第一个参数是由左侧表达式传入的，这里需要跳过。
 		args := b.args[len(arguments):]
 
+		// 逐个解析参数
 		for i, arg := range args {
-			if arg&optional == optional {
-				if p.current.Is(Bracket, ")") {
+			if arg&optional == optional { // 可选参数
+				if p.current.Is(Bracket, ")") { // 如果参数是可选的，遇到 ) 可以提前结束。
 					break
 				}
-			} else {
-				if p.current.Is(Bracket, ")") {
+			} else { // 必需参数
+				if p.current.Is(Bracket, ")") { // 如果参数是必须的，遇到 ) 则报错。
 					p.error("expected at least %d arguments", len(args))
 				}
 			}
 
+			// 参数间的逗号分隔符
 			if i > 0 {
 				p.expect(Operator, ",")
 			}
+
+			// 解析表达式参数或谓词参数
 			var node Node
 			switch {
 			case arg&expr == expr:
@@ -752,6 +797,7 @@ func (p *parser) parseCall(token Token, arguments []Node, checkOverrides bool) N
 		}
 
 		// skip last comma
+		// 允许最后一个参数后面有逗号，如 foo(1, 2,)，直接跳过
 		if p.current.Is(Operator, ",") {
 			p.next()
 		}
@@ -765,22 +811,30 @@ func (p *parser) parseCall(token Token, arguments []Node, checkOverrides bool) N
 			return nil
 		}
 	} else if _, ok := builtin.Index[token.Value]; ok && (p.config == nil || !p.config.Disabled[token.Value]) && !isOverridden {
+		// 情况2：内置函数
+
+		// 如果函数名在 builtin.Index 中，并且没有被禁用或覆盖，就按普通 builtin 函数处理。
 		node = p.createNode(&BuiltinNode{
 			Name:      token.Value,
-			Arguments: p.parseArguments(arguments),
+			Arguments: p.parseArguments(arguments), // 直接解析参数列表
 		}, token.Location)
 		if node == nil {
 			return nil
 		}
 
 	} else {
+		// 情况3：普通函数
+
+		// 创建函数名标识符节点
 		callee := p.createNode(&IdentifierNode{Value: token.Value}, token.Location)
 		if callee == nil {
 			return nil
 		}
+
+		// 创建函数调用节点
 		node = p.createNode(&CallNode{
 			Callee:    callee,
-			Arguments: p.parseArguments(arguments),
+			Arguments: p.parseArguments(arguments), // 直接解析参数列表
 		}, token.Location)
 		if node == nil {
 			return nil
@@ -1664,7 +1718,7 @@ func (p *parser) parseComparison(left Node, token Token, precedence int) Node {
 			}
 		}
 
-		// 更新左侧表达式为当前比较的右侧，继续循环
+		// 将当前右侧表达式设为 left ，继续循环
 		left = comparator
 		token = p.current
 		if !(token.Is(Operator) && operator.IsComparison(token.Value) && p.err == nil) { // 检查是否还有更多比较操作符
