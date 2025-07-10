@@ -1205,9 +1205,6 @@ func (p *parser) parsePostfixExpressionOrigin(node Node) Node {
 
 // parsePostfixExpression 解析后缀表达式（Postfix Expression），处理如属性访问、方法调用、数组切片等操作。
 //
-// 主表达式后面可能跟随后缀（属性访问、索引、函数调用、数组切片等）。
-// 此函数负责不断地处理它们，把它们挂在原始的表达式 node 上，直到不再是后缀为止。
-//
 //	foo.bar            // 属性访问
 //	foo?.bar           // 可选链访问
 //	foo.bar()          // 方法调用
@@ -1216,37 +1213,7 @@ func (p *parser) parsePostfixExpressionOrigin(node Node) Node {
 //	foo[1:3]           // 切片访问
 //	foo[:3], foo[1:], foo[:]  // 各种形式的切片
 //
-// 如果当前 token 是操作符（.、?.）或方括号（[），就可能是个后缀表达式，就要处理。
-//
-//  1. 如果当前 token 是 . 或 ?. ，意味着是成员访问或方法调用，如 foo.bar, foo.bar(), foo?.bar, foo?.bar(), foo?.["bar"] ；
-//     处理步骤：
-//     - 跳过 . 或 ?.
-//     - 读取下一个 token 应该是属性名（Identifier 或合法操作符）
-//     - 构造 MemberNode（表示属性访问），设置 Optional 标志
-//     - 如果接着是 ( 表示方法调用，就包装成 CallNode
-//     - 如果是可选链或已有链式调用，会包一层 ChainNode
-//
-//  2. 如果当前 token 是 [ ，意味着索引或切片访问
-//     处理步骤：
-//
-//     - 跳过 [
-//     - 看是否是切片还是普通访问：
-//     - : 开头：没有 from，只有 to
-//     - from : to：典型切片
-//     - 没有 :：普通索引访问（对应 MemberNode）
-//     - 对于可选链 ?.[x] 也正确处理
-//     - 构造 SliceNode 或 MemberNode
-//
-// 成员访问（. 和 ?. 操作符）
-//   - 处理对象属性访问（obj.property）
-//   - 处理可选链（obj?.property）
-//   - 处理方法调用（obj.method()）
-//
-// 数组索引/切片（[] 操作符）
-//   - 处理简单索引（array[0]）
-//   - 处理切片操作（array[1:3], array[:3], array[1:]）
-//
-// [重要]
+// [可选链]
 // 所有包含 ?. 的操作都会最终生成一个 ChainNode ，不管 ?. 出现在访问链的哪个位置，只要出现一次 ?. 整条链都会被包装在一个 ChainNode 中，以支持「短路」语义。
 //
 // 例子：
@@ -1329,7 +1296,7 @@ func (p *parser) parsePostfixExpressionOrigin(node Node) Node {
 // 普通链式访问的执行逻辑是直接的：每个属性访问步骤都假设前一个值存在，如果不存在则抛出错误。这种情况下，不需要额外的节点来处理短路逻辑，因此 AST 结构更简单。
 // 只有当表达式中包含 ?. 时，才需要 ChainNode 来实现短路语义，即在遇到 nil 时提前返回 nil 而不是继续执行。
 //
-// [重要]
+// [可选链解包]
 // 当左侧已经是 ChainNode 时，需要：
 //   - 解包：取出内部节点以继续构建链
 //   - 构建新节点：使用解包后的节点作为基础
@@ -1349,11 +1316,58 @@ func (p *parser) parsePostfixExpressionOrigin(node Node) Node {
 //  2. 遇到 ?.b，创建 MemberNode(MemberNode(obj, a, false), b, true)
 //  3. 封装为 ChainNode(MemberNode(MemberNode(obj, a), b))
 //
-// /
+// [方法调用]
+//
+// 示例1：普通字段访问 obj.property
+//
+//	MemberNode {
+//		Node:     IdentifierNode("user"),
+//		Property: StringNode("name"),
+//		Optional: false,
+//	}
+//
+// 示例2：方法调用 obj.method()
+//
+//	CallNode {
+//	   Callee: MemberNode {
+//	       Node:     IdentifierNode("obj"),
+//	       Property: StringNode("method"),
+//	       Method:   true,
+//	       Optional: false
+//	   },
+//	   Arguments: []  // 无参数
+//	}
+//
+// 示例3：可选调用 obj?.method()
+//
+//	ChainNode {
+//	   Node: CallNode {
+//	       Callee: MemberNode {
+//	           Node:     IdentifierNode("obj"),
+//	           Property: StringNode("method"),
+//	           Method:   true,
+//	           Optional: true
+//	       },
+//	       Arguments: []
+//	   }
+//	}
+//
+// 示例4：带参数的方法调用 obj.method(arg1, arg2)
+//
+//	CallNode {
+//	   Callee: MemberNode {
+//	       Node:     Identifier("obj"),
+//	       Property: "method",
+//	       Method:   true,
+//	   },
+//	   Arguments: [
+//	       Identifier("arg1"),
+//	       Identifier("arg2"),
+//	   ],
+//	}
 func (p *parser) parsePostfixExpression(node Node) Node {
-	postfixToken := p.current
-
 	// 循环检查当前 token 是否是操作符或括号（如 .、?.、[），如果是，就继续解析，直到遇到非后缀操作符或者出错为止。
+	postfixToken := p.current
 	for (postfixToken.Is(Operator) || postfixToken.Is(Bracket)) && p.err == nil {
 		optional := postfixToken.Value == "?."
 
@@ -1398,14 +1412,14 @@ func (p *parser) parsePostfixExpression(node Node) Node {
 				return nil
 			}
 
-			// 如果左侧已经是 ChainNode（如 obj?.a.b 中的 obj?.），则提取它的底层节点 Node（即 obj，可能是 MemberNode 或 IdentifierNode）。
+			// 如果左侧是 ChainNode ，则解包拿到内部节点，用于组装 MemberNode 链
 			chainNode, isChain := node.(*ChainNode)
 			optional := postfixToken.Value == "?."
 			if isChain {
 				node = chainNode.Node
 			}
 
-			// 创建 MemberNode，表示属性访问（如 obj.a 或 obj?.a）。
+			// 创建 MemberNode 封装新字段访问
 			memberNode := p.createMemberNode(&MemberNode{
 				Node:     node,
 				Property: property,
@@ -1415,6 +1429,7 @@ func (p *parser) parsePostfixExpression(node Node) Node {
 				return nil
 			}
 
+			// 判断是否为方法调用
 			if p.current.Is(Bracket, "(") {
 				memberNode.Method = true
 				node = p.createNode(&CallNode{
@@ -1428,6 +1443,7 @@ func (p *parser) parsePostfixExpression(node Node) Node {
 				node = memberNode
 			}
 
+			// 如果之前已经是可选链、或者当前是 ?. 可选操作符，就封装为 Chain
 			if isChain || optional {
 				node = p.createNode(&ChainNode{Node: node}, propertyToken.Location)
 				if node == nil {
@@ -1436,38 +1452,33 @@ func (p *parser) parsePostfixExpression(node Node) Node {
 			}
 
 		} else if postfixToken.Value == "[" {
-			p.next()
+			p.next()          // 跳过 '['
+			var from, to Node // 存储切片范围
 
-			var from, to Node
-
+			// 情况1：[:3] 或 [:]
 			if p.current.Is(Operator, ":") { // slice without from [:1]
-				p.next()
-
-				if !p.current.Is(Bracket, "]") { // slice without from and to [:]
+				p.next()                         // 跳过冒号 :
+				if !p.current.Is(Bracket, "]") { // 如果不是右括号，则解析 to
 					to = p.parseExpression(0)
 				}
-
-				node = p.createNode(&SliceNode{
+				node = p.createNode(&SliceNode{ // 创建切片节点
 					Node: node,
 					To:   to,
 				}, postfixToken.Location)
 				if node == nil {
 					return nil
 				}
-				p.expect(Bracket, "]")
-
+				p.expect(Bracket, "]") // 期望右括号
 			} else {
+				// 情况2：[1:3] 或 [1:]
 
-				from = p.parseExpression(0)
-
+				from = p.parseExpression(0) // 解析 from
 				if p.current.Is(Operator, ":") {
-					p.next()
-
-					if !p.current.Is(Bracket, "]") { // slice without to [1:]
+					p.next()                         // 跳过冒号 :
+					if !p.current.Is(Bracket, "]") { // 如果不是右括号，则解析 to
 						to = p.parseExpression(0)
 					}
-
-					node = p.createNode(&SliceNode{
+					node = p.createNode(&SliceNode{ // 创建切片节点
 						Node: node,
 						From: from,
 						To:   to,
@@ -1475,26 +1486,26 @@ func (p *parser) parsePostfixExpression(node Node) Node {
 					if node == nil {
 						return nil
 					}
-					p.expect(Bracket, "]")
+					p.expect(Bracket, "]") // 期望右括号
 
 				} else {
-					// Slice operator [:] was not found,
-					// it should be just an index node.
+					// 情况3：普通索引 [3]
 					node = p.createNode(&MemberNode{
 						Node:     node,
-						Property: from,
+						Property: from, // from 实际上是索引值
 						Optional: optional,
 					}, postfixToken.Location)
 					if node == nil {
 						return nil
 					}
+					// 可选链（?.）适用于普通索引（如 arr?.[3]）
 					if optional {
 						node = p.createNode(&ChainNode{Node: node}, postfixToken.Location)
 						if node == nil {
 							return nil
 						}
 					}
-					p.expect(Bracket, "]")
+					p.expect(Bracket, "]") // 期望右括号
 				}
 			}
 		} else {
@@ -1506,22 +1517,144 @@ func (p *parser) parsePostfixExpression(node Node) Node {
 	return node
 }
 
+// 解析类似 a > b、x == y 或链式比较 a < b < c 这样的表达式。
+//
+// 对于链式比较：
+//
+//	a < b < c
+//	x == y != z
+//	a <= b > c <= d
+//
+// 会被解析为逻辑与操作：
+//
+//	(a < b) && (b < c)
+//	(x == y) && (y != z)
+//	(a <= b) && (b > c) && (c <= d)
+//
+// 示例 1：简单比较 a > b
+//
+// 初始状态：
+//   - left = a（已解析的左侧）
+//   - token = >（当前操作符）
+//
+// 执行流程：
+//   - 解析 b → comparator = b
+//   - 创建 BinaryNode(Operator: ">", Left: a, Right: b)
+//   - rootNode = BinaryNode(a > b)
+//   - 下一个 token 不是比较操作符 → 退出循环
+//
+// 最终 AST：
+//
+//	BinaryNode {
+//	   Operator: ">",
+//	   Left:     Identifier("a"),
+//	   Right:    Identifier("b"),
+//	}
+//
+// 示例 2：链式比较 a < b < c
+//
+// 初始状态：
+//   - left = a（已解析的左侧）
+//   - token = <（当前操作符）
+//
+// 第一次循环：
+//   - 解析 b → comparator = b
+//   - 创建 BinaryNode(Operator: "<", Left: a, Right: b)
+//   - rootNode = BinaryNode(a < b)
+//   - left = b（下一次比较的左表达式）
+//
+// 第二次循环：
+//   - 解析 c → comparator = c
+//   - 创建 BinaryNode(Operator: "<", Left: b, Right: c)
+//   - 用 && 连接之前的 rootNode 和新的比较：
+//     BinaryNode {
+//     Operator: "&&",
+//     Left:     BinaryNode(a < b),
+//     Right:    BinaryNode(b < c),
+//     }
+//
+// 最终 AST：
+//
+//	BinaryNode {
+//	   Operator: "&&",
+//	   Left: BinaryNode {
+//	       Operator: "<",
+//	       Left:     Identifier("a"),
+//	       Right:    Identifier("b"),
+//	   },
+//	   Right: BinaryNode {
+//	       Operator: "<",
+//	       Left:     Identifier("b"),
+//	       Right:    Identifier("c"),
+//	   },
+//	}
+//
+// 语义等价于：(a < b) && (b < c)。
+//
+// 示例 3：混合比较 x == y != z
+// 第一次循环：
+//   - 解析 y → comparator = y
+//   - 创建 BinaryNode(Operator: "==", Left: x, Right: y)
+//   - rootNode = BinaryNode(x == y)
+//   - left = y
+//
+// 第二次循环：
+//   - 解析 z → comparator = z
+//   - 创建 BinaryNode(Operator: "!=", Left: y, Right: z)
+//   - 用 && 连接：
+//     BinaryNode {
+//     Operator: "&&",
+//     Left:     BinaryNode(x == y),
+//     Right:    BinaryNode(y != z),
+//     }
+//
+// 最终 AST：
+//
+//	BinaryNode {
+//	   Operator: "&&",
+//	   Left: BinaryNode {
+//	       Operator: "==",
+//	       Left:     Identifier("x"),
+//	       Right:    Identifier("y"),
+//	   },
+//	   Right: BinaryNode {
+//	       Operator: "!=",
+//	       Left:     Identifier("y"),
+//	       Right:    Identifier("z"),
+//	   },
+//	}
+//
+// 语义等价于：(x == y) && (y != z)。
+//
+// 关键设计点
+//   - 链式比较重构：通过 && 连接多个比较，确保语义正确（如 a < b < c 等价于 a < b 和 b < c）。
+//   - 优先级控制： parseExpression(precedence + 1) 确保右侧表达式优先计算（如 a > b + c 会先解析 b + c）。
+//   - 左递归转右递归：通过循环和 left = comparator 实现链式比较的解析，每次循环将当前右侧作为下一次左侧，实现 a < b < c 的从左到右解析顺序，避免递归爆栈。
+//
+// 边界情况
+//   - 单个比较（如 a > b）：直接返回 BinaryNode。
+//   - 空表达式：如果 parseExpression 返回 nil，整个函数返回 nil。
+//   - 非法操作符：如果下一个 token 不是比较操作符，循环终止。
 func (p *parser) parseComparison(left Node, token Token, precedence int) Node {
 	var rootNode Node
 	for {
+		// 解析右侧表达式（优先级高于当前比较操作）
 		comparator := p.parseExpression(precedence + 1)
+		// 创建当前比较节点（如 a < b）
 		cmpNode := p.createNode(&BinaryNode{
-			Operator: token.Value,
-			Left:     left,
-			Right:    comparator,
+			Operator: token.Value, // 比较操作符（如 <, >, ==）
+			Left:     left,        // 左侧表达式
+			Right:    comparator,  // 右侧表达式
 		}, token.Location)
 		if cmpNode == nil {
 			return nil
 		}
+
+		// 构建逻辑与链
 		if rootNode == nil {
-			rootNode = cmpNode
+			rootNode = cmpNode // 第一个比较表达式
 		} else {
-			rootNode = p.createNode(&BinaryNode{
+			rootNode = p.createNode(&BinaryNode{ // 将新比较表达式与之前的结果用 && 连接
 				Operator: "&&",
 				Left:     rootNode,
 				Right:    cmpNode,
@@ -1531,9 +1664,10 @@ func (p *parser) parseComparison(left Node, token Token, precedence int) Node {
 			}
 		}
 
+		// 更新左侧表达式为当前比较的右侧，继续循环
 		left = comparator
 		token = p.current
-		if !(token.Is(Operator) && operator.IsComparison(token.Value) && p.err == nil) {
+		if !(token.Is(Operator) && operator.IsComparison(token.Value) && p.err == nil) { // 检查是否还有更多比较操作符
 			break
 		}
 		p.next()
