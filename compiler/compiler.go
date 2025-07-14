@@ -133,7 +133,7 @@ func (c *compiler) nodeParent() ast.Node {
 //	locations:  [loc1,   loc2,   loc3]        // 各指令对应的源代码位置
 func (c *compiler) emitLocation(loc file.Location, op Opcode, arg int) int {
 	c.bytecode = append(c.bytecode, op)    // 添加操作码
-	current := len(c.bytecode)             // 获取指令地址
+	current := len(c.bytecode)             // 获取指令地址，也即是第几条指令
 	c.arguments = append(c.arguments, arg) // 添加参数
 	c.locations = append(c.locations, loc) // 添加源码位置
 	return current                         // 返回指令地址（可以用于跳转、回填等用途）
@@ -1006,6 +1006,20 @@ func (c *compiler) MemberNode(node *ast.MemberNode) {
 	}
 }
 
+// SliceNode
+//
+// 数组语法：
+//
+//	arr[1:3]   // 从索引 1 到 3（不包含）
+//	arr[1:]    // 从索引 1 到结尾
+//	arr[:3]    // 从开头到索引 3（不包含）
+//	arr[:]     // 整个数组
+//
+// 步骤：
+//  1. 递归编译被切片的对象（如数组、字符串），将其压入栈顶。
+//  2. 若指定了 end ，编译 end 表达式并压栈，否则通过 OpLen 获取对象长度作为默认 end。
+//  3. 若指定了 start ，编译 start 表达式并压栈，否则压入默认值 0 作为起始索引。
+//  4. 生成 OpSlice 指令，从栈顶弹出 end、start 和目标对象，执行切片并将结果压栈。
 func (c *compiler) SliceNode(node *ast.SliceNode) {
 	c.compile(node.Node)
 	if node.To != nil {
@@ -1021,47 +1035,89 @@ func (c *compiler) SliceNode(node *ast.SliceNode) {
 	c.emit(OpSlice)
 }
 
+// CallNode 根据被调用目标的类型和上下文，生成函数调用字节码，支持普通函数、方法调用和内置函数。
+// 1. 参数处理阶段
+// 2. 被调用函数处理阶段
+//
+//
+// 举例
+//
+// 表达式：
+//	user.setName("Tom")
+// 编译流程：
+//	1. 判断 setName 是否是 user 的方法 → 是
+//  2. 将 user 压入栈，作为 receiver
+//  3. 编译参数 "Tom"
+//  4. 发出 OpCallTyped，类型检查已知，索引缓存
+//
+//
+// 示例 1：普通函数调用 add(1, 2)
+//	1. PUSH 1              ; 加载参数 1
+//	2. PUSH 2              ; 加载参数 2
+//	3. LOAD_FN add         ; 加载函数
+//	4. CALL 2              ; 调用函数，参数数量为 2
+//
+// 示例 2：方法调用 obj.add(1, 2)
+//	1. LOAD_VAR obj        ; 加载接收者 obj
+//	2. PUSH 1              ; 加载参数 1
+//	3. PUSH 2              ; 加载参数 2
+//	4. LOAD_METHOD add     ; 加载方法
+//	5. CALL 2              ; 调用方法，参数数量为 2（不含接收者）
+//
+// 示例 3：内置函数调用 print("hello")
+//	1. PUSH "hello"        ; 加载参数
+//	2. CALL_BUILTIN print  ; 调用内置函数
+
 func (c *compiler) CallNode(node *ast.CallNode) {
 	fn := node.Callee.Type()
 	if fn.Kind() == reflect.Func {
+		// 处理反射函数
 
+		// 初始化参数偏移量和参数个数
 		fnInOffset := 0
 		fnNumIn := fn.NumIn()
 
+		// 检查是否是方法调用（需要跳过第一个this参数）
 		switch callee := node.Callee.(type) {
 		case *ast.MemberNode:
+			// 调用成员函数 obj.method(...) 的情况
 			if prop, ok := callee.Property.(*ast.StringNode); ok {
 				if _, ok = callee.Node.Type().MethodByName(prop.Value); ok && callee.Node.Type().Kind() != reflect.Interface {
-					fnInOffset = 1
-					fnNumIn--
+					fnInOffset = 1 // 跳过 receiver 参数
+					fnNumIn--      // 实际参数数量少一个
 				}
 			}
 		case *ast.IdentifierNode:
+			// 直接调用方法名 method(...)
 			if t, ok := c.config.Env.MethodByName(callee.Value); ok && t.Method {
 				fnInOffset = 1
 				fnNumIn--
 			}
 		}
 
+		// 编译每个参数并处理类型转换
 		for i, arg := range node.Arguments {
+			// 编译参数表达式，将结果压栈。
 			c.compile(arg)
-
+			// 获取参数类型
 			var in reflect.Type
 			if fn.IsVariadic() && i >= fnNumIn-1 {
-				in = fn.In(fn.NumIn() - 1).Elem()
+				in = fn.In(fn.NumIn() - 1).Elem() // 可变参数
 			} else {
-				in = fn.In(i + fnInOffset)
+				in = fn.In(i + fnInOffset) // 常规参数
 			}
-
+			// 解引用（若必要）
 			c.derefParam(in, arg)
 		}
 
 	} else {
+		// 普通函数，直接编译所有参数
 		for _, arg := range node.Arguments {
 			c.compile(arg)
 		}
 	}
 
+	// 若调用的是内置函数（如 print），直接 emitFunction 。
 	if ident, ok := node.Callee.(*ast.IdentifierNode); ok {
 		if c.config != nil {
 			if fn, ok := c.config.Functions[ident.Value]; ok {
@@ -1070,10 +1126,17 @@ func (c *compiler) CallNode(node *ast.CallNode) {
 			}
 		}
 	}
+
+	// 编译被调函数表达式，压入栈顶。
 	c.compile(node.Callee)
 
+	// 根据函数类型生成不同的调用指令
+	//  - OpCallTyped：静态类型函数（性能最优）。
+	//  - OpCallFast：快速调用（无反射开销）。
+	//  - OpCall：普通调用（支持反射）。
 	if c.config != nil {
 		isMethod, _, _ := checker.MethodIndex(c.config.Env, node.Callee)
+
 		if index, ok := checker.TypedFuncIndex(node.Callee.Type(), isMethod); ok {
 			c.emit(OpCallTyped, index)
 			return
@@ -1447,6 +1510,14 @@ func (c *compiler) PredicateNode(node *ast.PredicateNode) {
 	c.compile(node.Node)
 }
 
+// PointerNode
+//
+// Q: 什么是 PointerNode？
+// A: PointerNode 表示一个指针引用或上下文标识符，用于在某些作用域内引用上下文值，通常由 # 或 . 语法产生，例如：
+//   - .：当前对象（类似 JS 中的 this，或 Python 中的 self）
+//   - #index：当前循环下标
+//   - #acc：累加器（常用于 reduce 表达式）
+//   - #foo：其他具名引用
 func (c *compiler) PointerNode(node *ast.PointerNode) {
 	switch node.Name {
 	case "index":
@@ -1473,6 +1544,27 @@ func (c *compiler) addVariable(name string) int {
 	return c.variables - 1
 }
 
+// VariableDeclaratorNode
+//
+// 步骤：
+//  1. 编译变量的初始值表达式，结果会留在栈顶
+//  2. 在变量表中为变量分配一个槽位，并记录变量名用于调试
+//  3. 生成存储指令，将栈顶的值存入变量槽位
+//  4. 将变量压入作用域栈，标记该变量的作用域开始，此时变量仅在当前作用域可见。
+//  5. 编译变量作用域内的表达式，这些表达式可引用当前变量。
+//  6. 弹出当前作用域，恢复上一级作用域，标记变量作用域结束，此后变量不再可见。
+//
+// 举例：
+//
+//	let x = 10; x + 5
+//
+// 子节码：
+//  1. PUSH 10           ; 加载常量 10（初始化值）
+//  2. STORE 0           ; 将值存入变量 x（索引 0）
+//  3. LOAD_VAR 0        ; 加载变量 x
+//  4. PUSH 5            ; 加载常量 5
+//  5. ADD               ; 执行加法 x + 5
+//  6. ...               ; 后续指令
 func (c *compiler) VariableDeclaratorNode(node *ast.VariableDeclaratorNode) {
 	c.compile(node.Value)
 	index := c.addVariable(node.Name)
@@ -1508,6 +1600,36 @@ func (c *compiler) lookupVariable(name string) (int, bool) {
 	return 0, false
 }
 
+// ConditionalNode 编译三元表达式：
+//
+//	cond ? exp1 : exp2
+//
+// 步骤：
+//  1. 编译条件表达式 cond，把它的结果压栈。
+//  2. 生成 OpJumpIfFalse 指令，如果 cond 为假，则跳转到 exp2 的位置，placeholder 是待回填的跳转地址，otherwise 保存当前指令的绝对地址。
+//  3. 条件为真时，pop 掉掉栈顶的 cond 结果（布尔值），因为它已经不再需要。
+//  4. 编译 exp1，也就是 cond 为真时要执行的表达式。
+//  5. 生成无条件跳转 OpJump，跳过 exp2 到整个三元表达式的后面，end 保存着当前跳转指令的绝对位置(索引)，用于后续回填。
+//  6. 至此到达 else 分支，将步骤 2 处跳转的目标地址修正为当前指令，也就是 exp2 开始的位置。
+//  7. 类似步骤 3 ，条件为假时，也 pop 掉栈顶的 cond 结果（布尔值）。
+//  8. 编译 exp2 分支。
+//  9. 至此到达三元式末尾，需要修正步骤 5 处跳转的目标地址。
+//
+// 举例：
+//
+//	a > 10 ? x : y
+//
+// 子节码：
+//  1. LOAD_VAR a        ; 加载变量 a
+//  2. PUSH 10           ; 加载常量 10
+//  3. MORE              ; 比较 a > 10
+//  4. JUMP_IF_FALSE 8   ; 若结果为 false，跳转到第 8 行
+//  5. POP               ; 弹出条件值
+//  6. LOAD_VAR x        ; 加载变量 x（真值分支）
+//  7. JUMP 10           ; 跳转到第 10 行，跳过假值分支
+//  8. POP               ; 弹出条件值（若条件为 false，执行到这里）
+//  9. LOAD_VAR y        ; 加载变量 y（假值分支）
+//  10. ...              ; 后续指令
 func (c *compiler) ConditionalNode(node *ast.ConditionalNode) {
 	c.compile(node.Cond)
 	otherwise := c.emit(OpJumpIfFalse, placeholder)
