@@ -515,20 +515,35 @@ func (p *parser) parseConditionalIf() Node {
 //   - a?b:c
 //   - a?:c
 func (p *parser) parseConditional(node Node) Node {
+	p.logf("[COND] Start parsing conditional expression with node=%T(%v)", node, node)
+
 	var expr1, expr2 Node
 	// 支持嵌套条件表达式（如 a?b:c?d:e）
 	for p.current.Is(Operator, "?") && p.err == nil {
+		p.logf("[COND] Found '?' operator at pos=%d", p.pos)
 		p.next() // 消耗掉问号 '?'
+
 		if !p.current.Is(Operator, ":") {
+			p.logf("[COND] Standard form (a?b:c) detected")
+
 			// 标准形式 a?b:c
+			p.logf("[COND] Parsing true expression")
 			expr1 = p.parseExpression(0)
+			p.logf("[COND] Get true expression: %T(%v)", expr1, expr1)
+
 			p.expect(Operator, ":")
+			p.logf("[COND] Found ':' separator")
+
+			p.logf("[COND] Parsing false expression")
 			expr2 = p.parseExpression(0)
+			p.logf("[COND] Get false expression: %T(%v)", expr2, expr2)
 		} else {
+			p.logf("[COND] Short form (a?:c) detected, using original node as true expression")
 			// 简写形式 a?:c（等价于 a?a:c）
 			p.next() // 消耗掉冒号 ':'
 			expr1 = node
 			expr2 = p.parseExpression(0)
+			p.logf("[COND] Parsed false expression for short form: %T(%v)", expr2, expr2)
 		}
 
 		node = p.createNode(&ConditionalNode{
@@ -536,38 +551,59 @@ func (p *parser) parseConditional(node Node) Node {
 			Exp1: expr1,
 			Exp2: expr2,
 		}, p.current.Location)
+
+		p.logf("[COND] Created conditional node: cond=%T(%v), true=%T(%v), false=%T(%v)",
+			node.(*ConditionalNode).Cond, node.(*ConditionalNode).Cond,
+			node.(*ConditionalNode).Exp1, node.(*ConditionalNode).Exp1,
+			node.(*ConditionalNode).Exp2, node.(*ConditionalNode).Exp2)
+
 		if node == nil {
+			p.logf("[COND-ERROR] Failed to create conditional node")
 			return nil
 		}
 	}
+
+	p.logf("[COND] Finished parsing conditional expression, returning %T(%v)", node, node)
 	return node
 }
 
 func (p *parser) parsePrimary() Node {
 	token := p.current
+	p.logf("[PRIMARY] Start parsing primary at token=%v (pos=%d)", token.Value, p.pos)
 
 	if token.Is(Operator) {
+		p.logf("[PRIMARY] Found unary operator `%s`", token.Value)
 		// 一元操作符：not、!、-、+
 		if op, ok := operator.Unary[token.Value]; ok {
 			p.next()                                 // 消耗操作符
 			expr := p.parseExpression(op.Precedence) // 解析右侧表达式
+			p.logf("[PRIMARY] Unary operator `%s` right expr: %T", token.Value, expr)
 			node := p.createNode(&UnaryNode{
 				Operator: token.Value,
 				Node:     expr,
 			}, token.Location)
 			if node == nil {
+				p.logf("[PRIMARY] Failed to create UnaryNode for `%s`", token.Value)
 				return nil
 			}
-			return p.parsePostfixExpression(node) // 处理后缀，形如 -x.y、-x[0]、-(a + b).foo
+
+			result := p.parsePostfixExpression(node) // 处理后缀，形如 -x.y、-x[0]、-(a + b).foo
+			p.logf("[PRIMARY] Unary with postfix: %T", result)
+			return result
 		}
 	}
 
 	// 括号表达式
 	if token.Is(Bracket, "(") {
-		p.next()                              // 跳过 `(`
-		expr := p.parseSequenceExpression()   // 解析括号内表达式
-		p.expect(Bracket, ")")                // 必须闭合
-		return p.parsePostfixExpression(expr) // 处理后缀（如 `(x + y).prop`）
+		p.logf("[PRIMARY] Found opening bracket `(`")
+		p.next()                            // 跳过 `(`
+		expr := p.parseSequenceExpression() // 解析括号内表达式
+		p.logf("[PRIMARY] Parsed inner expression in brackets: %T", expr)
+		p.expect(Bracket, ")") // 必须闭合
+		p.logf("[PRIMARY] Closed bracket expression")
+		result := p.parsePostfixExpression(expr) // 处理后缀（如 `(x + y).prop`）
+		p.logf("[PRIMARY] Bracket expression with postfix: %T", result)
+		return result
 	}
 
 	// 解析指针或引用
@@ -578,20 +614,29 @@ func (p *parser) parsePrimary() Node {
 	//	users | filter({ .age > 18 }) ，这里 .age 等价于 this.status 。
 	if p.depth > 0 { // 指针/引用通常用于局部上下文
 		if token.Is(Operator, "#") || token.Is(Operator, ".") {
+			p.logf("[PRIMARY] Found pointer/reference operator: %v", token.Value)
 			name := ""
 			if token.Is(Operator, "#") {
 				p.next()
 				if p.current.Is(Identifier) {
 					name = p.current.Value // 获取引用对象名
+					p.logf("[PRIMARY] Named reference found: #%s", name)
 					p.next()
 				}
+			} else {
+				p.logf("[PRIMARY] Anonymous pointer (this/self) found")
 			}
+
 			node := p.createNode(&PointerNode{Name: name}, token.Location)
 			if node == nil {
+				p.logf("[PRIMARY-ERROR] Failed to create pointer node")
 				return nil
 			}
+			p.logf("[PRIMARY] Created pointer node: name=%s", name)
 			// 支持后缀访问，例如：#foo.bar
-			return p.parsePostfixExpression(node)
+			result := p.parsePostfixExpression(node)
+			p.logf("[PRIMARY] Reference with postfix: %T", result)
+			return result
 		}
 	}
 
@@ -603,37 +648,51 @@ func (p *parser) parsePrimary() Node {
 	//	- 内置函数保护：确保核心内置函数不被意外覆盖。例如，::len() 始终调用内置的长度函数，即使代码中定义了同名变量。
 	//	- 代码可读性：明确标识函数的来源，使代码更易理解。例如，::math.sqrt(x) 清晰表明 sqrt 是全局数学库中的函数。
 	if token.Is(Operator, "::") {
+		p.logf("[PRIMARY] Found global namespace operator ::")
 		p.next() // 消耗 "::"
 		token = p.current
 		p.expect(Identifier) // 确保 "::" 后是标识符，用作全局函数名
-		return p.parsePostfixExpression(p.parseCall(token, []Node{}, false))
+		p.logf("[PRIMARY] Global function identifier: `%s`", token.Value)
+		callNode := p.parseCall(token, []Node{}, false) // 解析全局函数调用并处理后缀
+		result := p.parsePostfixExpression(callNode)
+		p.logf("[PRIMARY] Global function call with postfix: %T", result)
+		return result
 	}
 
-	// 如果以上都未匹配，则解析基础字面量
-	return p.parseSecondary()
+	p.logf("[PRIMARY] No primary matches, fall back to secondary parsing")
+	result := p.parseSecondary() // 如果以上都未匹配，则解析基础字面量
+	p.logf("[PRIMARY] Finished primary parsing, returning %T", result)
+	return result
 }
 
 func (p *parser) parseSecondary() Node {
 	var node Node
 	token := p.current
+	p.logf("[SECONDARY] Start parsing secondary at token=%v (kind=%v, pos=%d)", token.Value, token.Kind, p.pos)
+
 	switch token.Kind {
 	case Identifier:
+		p.logf("[SECONDARY] Found identifier: %s", token.Value)
 		p.next()
 		// 如果标识符是一些特殊字面量，解析为对应的特殊类型节点；如果标识符后紧接着 ( ，解析为函数调用；否则，就是单纯一个标识符节点。
 		switch token.Value {
 		case "true":
+			p.logf("[SECONDARY] Parse boolean literal: true")
 			node = p.createNode(&BoolNode{Value: true}, token.Location)
 			if node == nil {
+				p.logf("[SECONDARY] Failed to create BoolNode (true)")
 				return nil
 			}
 			return node
 		case "false":
+			p.logf("[SECONDARY] Parse boolean literal: false")
 			node = p.createNode(&BoolNode{Value: false}, token.Location)
 			if node == nil {
 				return nil
 			}
 			return node
 		case "nil":
+			p.logf("[SECONDARY] Parse nil literal")
 			node = p.createNode(&NilNode{}, token.Location)
 			if node == nil {
 				return nil
@@ -641,8 +700,10 @@ func (p *parser) parseSecondary() Node {
 			return node
 		default:
 			if p.current.Is(Bracket, "(") {
+				p.logf("[SECONDARY] Identifier followed by '(', parse as function call")
 				node = p.parseCall(token, []Node{}, true)
 			} else {
+				p.logf("[SECONDARY] Parse as identifier node: %s", token.Value)
 				node = p.createNode(&IdentifierNode{Value: token.Value}, token.Location)
 				if node == nil {
 					return nil
@@ -650,36 +711,43 @@ func (p *parser) parseSecondary() Node {
 			}
 		}
 	case Number:
+		p.logf("[SECONDARY] Found number literal: %s", token.Value)
 		p.next()
 		value := strings.Replace(token.Value, "_", "", -1) // 移除数字分隔符，支持在数字中使用下划线（如 1_000_000）
 		var node Node
 		valueLower := strings.ToLower(value)
+		p.logf("[SECONDARY] Process number (cleaned: %s, lower: %s)", value, valueLower)
 		switch {
 		case strings.HasPrefix(valueLower, "0x"):
+			p.logf("[SECONDARY] Parse as hexadecimal number")
 			number, err := strconv.ParseInt(value, 0, 64)
 			if err != nil {
 				p.error("invalid hex literal: %v", err)
 			}
 			node = p.toIntegerNode(number)
 		case strings.ContainsAny(valueLower, ".e"):
+			p.logf("[SECONDARY] Parse as floating-point number")
 			number, err := strconv.ParseFloat(value, 64)
 			if err != nil {
 				p.error("invalid float literal: %v", err)
 			}
 			node = p.toFloatNode(number)
 		case strings.HasPrefix(valueLower, "0b"):
+			p.logf("[SECONDARY] Parse as binary number")
 			number, err := strconv.ParseInt(value, 0, 64)
 			if err != nil {
 				p.error("invalid binary literal: %v", err)
 			}
 			node = p.toIntegerNode(number)
 		case strings.HasPrefix(valueLower, "0o"):
+			p.logf("[SECONDARY] Parse as octal number")
 			number, err := strconv.ParseInt(value, 0, 64)
 			if err != nil {
 				p.error("invalid octal literal: %v", err)
 			}
 			node = p.toIntegerNode(number)
 		default:
+			p.logf("[SECONDARY] Parse as decimal integer")
 			number, err := strconv.ParseInt(value, 10, 64)
 			if err != nil {
 				p.error("invalid integer literal: %v", err)
@@ -688,9 +756,13 @@ func (p *parser) parseSecondary() Node {
 		}
 		if node != nil {
 			node.SetLocation(token.Location)
+			p.logf("[SECONDARY] Created number node: %T (value: %v)", node, node)
+		} else {
+			p.logf("[SECONDARY] Failed to create number node")
 		}
 		return node
 	case String:
+		p.logf("[SECONDARY] Found string literal: %s", token.Value)
 		p.next()
 		node = p.createNode(&StringNode{Value: token.Value}, token.Location)
 		if node == nil {
@@ -699,10 +771,13 @@ func (p *parser) parseSecondary() Node {
 	default:
 		// 集合字面量
 		if token.Is(Bracket, "[") {
+			p.logf("[SECONDARY] Found array literal '['")
 			node = p.parseArrayExpression(token) // 数组，如 [1, 2, 3]
 		} else if token.Is(Bracket, "{") {
+			p.logf("[SECONDARY] Found map literal '{'")
 			node = p.parseMapExpression(token) // 映射，如 {"k": "v"}
 		} else {
+			p.logf("[SECONDARY] Error: unexpected token %v", token)
 			p.error("unexpected token %v", token) // 无法识别
 		}
 	}
@@ -714,7 +789,10 @@ func (p *parser) parseSecondary() Node {
 	//	- 索引访问：arr[0]
 	//	- 切片操作：arr[1:3]
 	//	- 可选链：obj?.property
-	return p.parsePostfixExpression(node)
+	p.logf("[SECONDARY] Process postfix expressions for node: %T", node)
+	result := p.parsePostfixExpression(node)
+	p.logf("[SECONDARY] Finish parsing secondary, return node: %T", result)
+	return result
 }
 
 func (p *parser) toIntegerNode(number int64) Node {
@@ -749,39 +827,54 @@ func (p *parser) toFloatNode(number float64) Node {
 //     users | filter(age > 18 && contains(name, "John")) 等价于 filter(users, (age > 18 && contains(name, "John"))
 //  3. 参数解析逻辑不同，谓词参数需要通过 parsePredicate 来解析，走特殊执行流程。
 func (p *parser) parseCall(token Token, arguments []Node, checkOverrides bool) Node {
+	p.parseDepth++
+	defer func() { p.parseDepth-- }()
+	p.logf("[CALL] Start parsing function call for '%s' at pos=%d", token.Value, p.pos)
 	var node Node
 
 	// 检查该函数是否被用户自定义实现覆盖，如果 checkOverrides 为 false，则不考虑覆盖。
 	isOverridden := false
 	if p.config != nil {
 		isOverridden = p.config.IsOverridden(token.Value)
+		p.logf("[CALL] Function override check: isOverridden=%v (config exists: %v)", isOverridden, p.config != nil)
 	}
 	isOverridden = isOverridden && checkOverrides
+	p.logf("[CALL] Final override status: %v (checkOverrides=%v)", isOverridden, checkOverrides)
 
 	// 情况1：预定义谓词函数
 	if b, ok := predicates[token.Value]; ok && !isOverridden {
+		p.logf("[CALL] Found predicate function: %s", token.Value)
 		p.expect(Bracket, "(")
+		p.logf("[CALL] Parsing arguments for predicate function")
 
 		// In case of the pipe operator, the first argument is the left-hand side
 		// of the operator, so we do not parse it as an argument inside brackets.
 		//
 		// b.args 是 predicate 函数期望的参数类型列表，处理管道操作符时，第一个参数是由左侧表达式传入的，这里需要跳过。
 		args := b.args[len(arguments):]
+		p.logf("[CALL] Expected arguments: %d (already have %d from pipe)",
+			len(args), len(arguments))
 
 		// 逐个解析参数
 		for i, arg := range args {
+			p.logf("[CALL] Processing argument %d (type: %v)", i+1, arg)
 			if arg&optional == optional { // 可选参数
+				p.logf("[CALL] Argument is optional")
 				if p.current.Is(Bracket, ")") { // 如果参数是可选的，遇到 ) 可以提前结束。
+					p.logf("[CALL] Early termination - optional argument skipped")
 					break
 				}
 			} else { // 必需参数
+				p.logf("[CALL] Argument is required")
 				if p.current.Is(Bracket, ")") { // 如果参数是必须的，遇到 ) 则报错。
+					p.logf("[CALL-ERROR] Missing required argument")
 					p.error("expected at least %d arguments", len(args))
 				}
 			}
 
 			// 参数间的逗号分隔符
 			if i > 0 {
+				p.logf("[CALL] Expecting comma separator")
 				p.expect(Operator, ",")
 			}
 
@@ -789,57 +882,77 @@ func (p *parser) parseCall(token Token, arguments []Node, checkOverrides bool) N
 			var node Node
 			switch {
 			case arg&expr == expr:
+				p.logf("[CALL] Parsing expression argument")
 				node = p.parseExpression(0)
 			case arg&predicate == predicate:
+				p.logf("[CALL] Parsing predicate argument")
 				node = p.parsePredicate()
 			}
 			arguments = append(arguments, node)
+			p.logf("[CALL] Added argument %d: %T", i+1, node)
 		}
 
 		// skip last comma
 		// 允许最后一个参数后面有逗号，如 foo(1, 2,)，直接跳过
 		if p.current.Is(Operator, ",") {
+			p.logf("[CALL] Skipping trailing comma")
 			p.next()
 		}
 		p.expect(Bracket, ")")
-
+		p.logf("[CALL] Closing parenthesis found")
 		node = p.createNode(&BuiltinNode{
 			Name:      token.Value,
 			Arguments: arguments,
 		}, token.Location)
 		if node == nil {
+			p.logf("[CALL-ERROR] Failed to create builtin node for predicate")
 			return nil
 		}
+		p.logf("[CALL] Created predicate builtin node with %d arguments", len(arguments))
 	} else if _, ok := builtin.Index[token.Value]; ok && (p.config == nil || !p.config.Disabled[token.Value]) && !isOverridden {
 		// 情况2：内置函数
+		p.logf("[CALL] Found builtin function: %s", token.Value)
+
+		parsedArgs := p.parseArguments(arguments)
+		p.logf("[CALL] Parsed %d arguments for builtin function", len(parsedArgs))
 
 		// 如果函数名在 builtin.Index 中，并且没有被禁用或覆盖，就按普通 builtin 函数处理。
 		node = p.createNode(&BuiltinNode{
 			Name:      token.Value,
-			Arguments: p.parseArguments(arguments), // 直接解析参数列表
+			Arguments: parsedArgs, // 直接解析参数列表
 		}, token.Location)
 		if node == nil {
+			p.logf("[CALL-ERROR] Failed to create builtin node")
 			return nil
 		}
+		p.logf("[CALL] Created builtin node with %d arguments", len(parsedArgs))
 
 	} else {
 		// 情况3：普通函数
-
+		p.logf("[CALL] Parsing regular function call: %s", token.Value)
 		// 创建函数名标识符节点
 		callee := p.createNode(&IdentifierNode{Value: token.Value}, token.Location)
 		if callee == nil {
+			p.logf("[CALL-ERROR] Failed to create callee identifier node")
 			return nil
 		}
+		p.logf("[CALL] Created callee identifier node")
+
+		parsedArgs := p.parseArguments(arguments)
+		p.logf("[CALL] Parsed %d arguments for function call", len(parsedArgs))
 
 		// 创建函数调用节点
 		node = p.createNode(&CallNode{
 			Callee:    callee,
-			Arguments: p.parseArguments(arguments), // 直接解析参数列表
+			Arguments: parsedArgs, // 直接解析参数列表
 		}, token.Location)
 		if node == nil {
+			p.logf("[CALL-ERROR] Failed to create call node")
 			return nil
 		}
+		p.logf("[CALL] Created call node with %d arguments", len(parsedArgs))
 	}
+	p.logf("[CALL] Finished parsing call for '%s'", token.Value)
 	return node
 }
 
@@ -952,34 +1065,53 @@ func (p *parser) parseArguments(arguments []Node) []Node {
 //
 //   - 触发错误 "wrap predicate with brackets { and }"。
 func (p *parser) parsePredicate() Node {
+	p.parseDepth++
+	defer func() { p.parseDepth-- }()
+
 	startToken := p.current
+	p.logf("[PREDICATE] Enter parsePredicate at token=%v pos=%d", startToken, p.pos)
+
 	withBrackets := false
 	if p.current.Is(Bracket, "{") {
+		p.logf("[PREDICATE] Found `{`, start block predicate")
 		p.next()
 		withBrackets = true
 	}
 
 	p.depth++
 	var node Node
+
 	if withBrackets {
+		p.logf("[PREDICATE] Parsing sequence expression in `{}`")
 		node = p.parseSequenceExpression()
+		p.logf("[PREDICATE] Parsed sequence expression: %T(%v)", node, node)
 	} else {
+		p.logf("[PREDICATE] Parsing inline expression")
 		node = p.parseExpression(0)
+		p.logf("[PREDICATE] Parsed inline expression: %T(%v)", node, node)
+
 		if p.current.Is(Operator, ";") {
+			p.logf("[ERROR] Unexpected `;` in inline predicate — brackets `{}` required")
 			p.error("wrap predicate with brackets { and }")
 		}
 	}
 	p.depth--
 
 	if withBrackets {
+		p.logf("[PREDICATE] Expecting closing `}`")
 		p.expect(Bracket, "}")
 	}
+
 	predicateNode := p.createNode(&PredicateNode{
 		Node: node,
 	}, startToken.Location)
 	if predicateNode == nil {
+		p.logf("[ERROR] Failed to create PredicateNode")
 		return nil
 	}
+
+	p.logf("[PREDICATE] Created PredicateNode: %T(%v)", predicateNode, predicateNode)
+	p.logf("[PREDICATE] Exit parsePredicate")
 	return predicateNode
 }
 
@@ -1420,20 +1552,25 @@ func (p *parser) parsePostfixExpressionOrigin(node Node) Node {
 //	   ],
 //	}
 func (p *parser) parsePostfixExpression(node Node) Node {
+	p.logf("[POSTFIX] Enter parsePostfixExpression, start node=%T(%v)", node, node)
+
 	// 循环检查当前 token 是否是操作符或括号（如 .、?.、[），如果是，就继续解析，直到遇到非后缀操作符或者出错为止。
 	postfixToken := p.current
 	for (postfixToken.Is(Operator) || postfixToken.Is(Bracket)) && p.err == nil {
 		optional := postfixToken.Value == "?."
+		p.logf("[POSTFIX] Processing token=%v (optional=%v) at pos=%d", postfixToken, optional, p.pos)
 
 	parseToken:
 		// 处理形如 obj.prop 或 obj?.prop 的表达式
 		if postfixToken.Value == "." || postfixToken.Value == "?." {
+			p.logf("[POSTFIX] Found member access: %v", postfixToken.Value)
 			p.next() // 跳过当前 . 或 ?. ，读取下一个 token
 
 			// 保存当前 token
 			propertyToken := p.current
 			// 如果当前字符是 [ ，意味着解析到 ?.[ ，需按照索引访问方式来解析
 			if optional && propertyToken.Is(Bracket, "[") { // 形如 foo?.["bar"]
+				p.logf("[POSTFIX] Nested optional index access detected")
 				postfixToken = propertyToken
 				goto parseToken
 			}
@@ -1457,12 +1594,14 @@ func (p *parser) parsePostfixExpression(node Node) Node {
 			if propertyToken.Kind != Identifier &&
 				// Operators like "not" and "matches" are valid methods or property names.
 				(propertyToken.Kind != Operator || !utils.IsValidIdentifier(propertyToken.Value)) {
+				p.logf("[ERROR] Invalid member name: %v", propertyToken)
 				p.error("expected name")
 			}
 
 			// 将属性名或方法名包装成 StringNode，用于后续构建 MemberNode。
 			property := p.createNode(&StringNode{Value: propertyToken.Value}, propertyToken.Location)
 			if property == nil {
+				p.logf("[ERROR] Failed to create StringNode for property")
 				return nil
 			}
 
@@ -1471,6 +1610,7 @@ func (p *parser) parsePostfixExpression(node Node) Node {
 			optional := postfixToken.Value == "?."
 			if isChain {
 				node = chainNode.Node
+				p.logf("[POSTFIX] Unwrapped ChainNode for chaining")
 			}
 
 			// 创建 MemberNode 封装新字段访问
@@ -1480,37 +1620,46 @@ func (p *parser) parsePostfixExpression(node Node) Node {
 				Optional: optional,
 			}, propertyToken.Location)
 			if memberNode == nil {
+				p.logf("[ERROR] Failed to create MemberNode")
 				return nil
 			}
+			p.logf("[POSTFIX] Created MemberNode")
 
 			// 判断是否为方法调用
 			if p.current.Is(Bracket, "(") {
+				p.logf("[POSTFIX] Detected method call on member: %v", propertyToken.Value)
 				memberNode.Method = true
 				node = p.createNode(&CallNode{
 					Callee:    memberNode,
 					Arguments: p.parseArguments([]Node{}),
 				}, propertyToken.Location)
 				if node == nil {
+					p.logf("[ERROR] Failed to create CallNode")
 					return nil
 				}
+				p.logf("[POSTFIX] Created CallNode on member")
 			} else {
 				node = memberNode
 			}
 
 			// 如果之前已经是可选链、或者当前是 ?. 可选操作符，就封装为 Chain
 			if isChain || optional {
+				p.logf("[POSTFIX] Wrapping result in ChainNode (optional chaining)")
 				node = p.createNode(&ChainNode{Node: node}, propertyToken.Location)
 				if node == nil {
+					p.logf("[ERROR] Failed to create ChainNode")
 					return nil
 				}
 			}
 
 		} else if postfixToken.Value == "[" {
+			p.logf("[POSTFIX] Found index/slice access")
 			p.next()          // 跳过 '['
 			var from, to Node // 存储切片范围
 
 			// 情况1：[:3] 或 [:]
 			if p.current.Is(Operator, ":") { // slice without from [:1]
+				p.logf("[POSTFIX] Slice [:to] detected")
 				p.next()                         // 跳过冒号 :
 				if !p.current.Is(Bracket, "]") { // 如果不是右括号，则解析 to
 					to = p.parseExpression(0)
@@ -1520,6 +1669,7 @@ func (p *parser) parsePostfixExpression(node Node) Node {
 					To:   to,
 				}, postfixToken.Location)
 				if node == nil {
+					p.logf("[ERROR] Failed to create SliceNode ([:to])")
 					return nil
 				}
 				p.expect(Bracket, "]") // 期望右括号
@@ -1528,6 +1678,7 @@ func (p *parser) parsePostfixExpression(node Node) Node {
 
 				from = p.parseExpression(0) // 解析 from
 				if p.current.Is(Operator, ":") {
+					p.logf("[POSTFIX] Slice [from:to] detected")
 					p.next()                         // 跳过冒号 :
 					if !p.current.Is(Bracket, "]") { // 如果不是右括号，则解析 to
 						to = p.parseExpression(0)
@@ -1538,11 +1689,13 @@ func (p *parser) parsePostfixExpression(node Node) Node {
 						To:   to,
 					}, postfixToken.Location)
 					if node == nil {
+						p.logf("[ERROR] Failed to create SliceNode ([from:to])")
 						return nil
 					}
 					p.expect(Bracket, "]") // 期望右括号
 
 				} else {
+					p.logf("[POSTFIX] Simple index access detected")
 					// 情况3：普通索引 [3]
 					node = p.createNode(&MemberNode{
 						Node:     node,
@@ -1550,12 +1703,15 @@ func (p *parser) parsePostfixExpression(node Node) Node {
 						Optional: optional,
 					}, postfixToken.Location)
 					if node == nil {
+						p.logf("[ERROR] Failed to create MemberNode for index access")
 						return nil
 					}
 					// 可选链（?.）适用于普通索引（如 arr?.[3]）
 					if optional {
+						p.logf("[POSTFIX] Wrapping index access in ChainNode (optional)")
 						node = p.createNode(&ChainNode{Node: node}, postfixToken.Location)
 						if node == nil {
+							p.logf("[ERROR] Failed to create ChainNode for index access")
 							return nil
 						}
 					}
@@ -1564,10 +1720,12 @@ func (p *parser) parsePostfixExpression(node Node) Node {
 			}
 		} else {
 			// 如果当前 token 不是成员访问 `.` 或 `?.` ，或者数组访问 `[` ，则跳出循环
+			p.logf("[POSTFIX] No more postfix tokens, breaking loop")
 			break
 		}
 		postfixToken = p.current
 	}
+	p.logf("[POSTFIX] Exit parsePostfixExpression, result node=%T(%v)", node, node)
 	return node
 }
 
@@ -1690,10 +1848,14 @@ func (p *parser) parsePostfixExpression(node Node) Node {
 //   - 空表达式：如果 parseExpression 返回 nil，整个函数返回 nil。
 //   - 非法操作符：如果下一个 token 不是比较操作符，循环终止。
 func (p *parser) parseComparison(left Node, token Token, precedence int) Node {
+	p.logf("[COMPARE] Start parsing comparison with left=%T(%v) op=%v prec=%d", left, left, token.Value, precedence)
+
 	var rootNode Node
 	for {
+		p.logf("[COMPARE] Parsing right-hand side expression for `%v`", token.Value)
 		// 解析右侧表达式（优先级高于当前比较操作）
 		comparator := p.parseExpression(precedence + 1)
+		p.logf("[COMPARE] Parsed right-hand node: %T(%v)", comparator, comparator)
 		// 创建当前比较节点（如 a < b）
 		cmpNode := p.createNode(&BinaryNode{
 			Operator: token.Value, // 比较操作符（如 <, >, ==）
@@ -1701,19 +1863,24 @@ func (p *parser) parseComparison(left Node, token Token, precedence int) Node {
 			Right:    comparator,  // 右侧表达式
 		}, token.Location)
 		if cmpNode == nil {
+			p.logf("[ERROR] Failed to create BinaryNode for comparison `%v`", token.Value)
 			return nil
 		}
+		p.logf("[COMPARE] Created comparison BinaryNode: `%v` %v `%v`", left, token.Value, comparator)
 
 		// 构建逻辑与链
 		if rootNode == nil {
 			rootNode = cmpNode // 第一个比较表达式
+			p.logf("[COMPARE] Set root comparison node")
 		} else {
+			p.logf("[COMPARE] Chaining with logical AND (&&)")
 			rootNode = p.createNode(&BinaryNode{ // 将新比较表达式与之前的结果用 && 连接
 				Operator: "&&",
 				Left:     rootNode,
 				Right:    cmpNode,
 			}, token.Location)
 			if rootNode == nil {
+				p.logf("[ERROR] Failed to create logical AND node in chained comparison")
 				return nil
 			}
 		}
@@ -1722,9 +1889,12 @@ func (p *parser) parseComparison(left Node, token Token, precedence int) Node {
 		left = comparator
 		token = p.current
 		if !(token.Is(Operator) && operator.IsComparison(token.Value) && p.err == nil) { // 检查是否还有更多比较操作符
+			p.logf("[COMPARE] No further comparison operator found, exiting")
 			break
 		}
+		p.logf("[COMPARE] Found chained comparison operator `%v`, continue", token.Value)
 		p.next()
 	}
+	p.logf("[COMPARE] Exit parseComparison with result node=%T(%v)", rootNode, rootNode)
 	return rootNode
 }
