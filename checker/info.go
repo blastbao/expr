@@ -160,6 +160,17 @@ func MethodIndex(env Nature, node ast.Node) (bool, int, string) {
 //
 //	fnType := reflect.TypeOf(WrongFunc)
 //	index, ok := TypedFuncIndex(fnType, false) // index = 0, ok = false（参数类型不匹配）
+
+// TypedFuncIndex 通过编译期类型匹配将动态调用转换为静态调用，省去反射类型检查，显著提升性能。
+// 它判断 fn 是否与 vm.FuncTypes 中某个函数类型完全一致（输入参数、返回值都一样），是则返回其索引。
+//
+// 主要作用：
+//   - 检查函数类型是否适合使用特化调用指令（OpCallTyped）
+//   - 返回匹配的预定义函数模板索引（用于生成高效调用指令）
+//
+// 特殊情况：
+//   - 变参函数，参数展开逻辑复杂，无法提前注册匹配，难以静态优化
+//   - 命名函数类型如 type MyFunc func(int) int 不支持
 func TypedFuncIndex(fn reflect.Type, method bool) (int, bool) {
 	if fn == nil {
 		return 0, false
@@ -192,6 +203,7 @@ funcTypes:
 		if typed.Kind() != reflect.Func {
 			continue
 		}
+		// 返回值数量和类型完全一致
 		if typed.NumOut() != fn.NumOut() {
 			continue
 		}
@@ -200,6 +212,7 @@ funcTypes:
 				continue funcTypes
 			}
 		}
+		// 参数数量和类型完全一致
 		if typed.NumIn() != fnNumIn {
 			continue
 		}
@@ -220,6 +233,21 @@ funcTypes:
 //   - 返回值数量：	1 个
 //   - 返回值类型：	interface{}
 //   - 可变参数类型：	...interface{}（即 []interface{}）
+//
+// 即：
+//   - func(receiverType, args ...interface{}) interface{}
+//   - func(args ...interface{}) interface{}
+//
+// 例如：
+//
+//	func Println(args ...interface{}) interface{} {
+//		fmt.Println(args...)
+//		return nil
+//	}
+//
+//	func (logger Logger) Log(args ...interface{}) interface{} {
+//		// ...
+//	}
 //
 // 场景：通常用于动态调用函数的场景，如：
 //   - RPC 框架：判断某个函数是否符合 RPC 调用规范（如接收 ...interface{} 并返回 interface{}）。

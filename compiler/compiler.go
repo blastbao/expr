@@ -764,19 +764,24 @@ func (c *compiler) BinaryNode(node *ast.BinaryNode) {
 	}
 }
 
+// 策略：语义保持一致前提下做特化指令选择，以提升性能。
 func (c *compiler) equalBinaryNode(node *ast.BinaryNode) {
+	// 编译左/右操作数
 	c.compile(node.Left)
 	c.derefInNeeded(node.Left)
 	c.compile(node.Right)
 	c.derefInNeeded(node.Right)
 
+	// 获取操作数类型信息
 	l := kind(node.Left.Type())
 	r := kind(node.Right.Type())
 
+	// 检查是否为简单类型（非自定义类型）
 	leftIsSimple := isSimpleType(node.Left)
 	rightIsSimple := isSimpleType(node.Right)
 	leftAndRightAreSimple := leftIsSimple && rightIsSimple
 
+	// 根据类型选择最优指令
 	if l == r && l == reflect.Int && leftAndRightAreSimple {
 		c.emit(OpEqualInt)
 	} else if l == r && l == reflect.String && leftAndRightAreSimple {
@@ -810,7 +815,7 @@ func isSimpleType(node ast.Node) bool {
 //	JUMP_IF_NIL end      ; 4. 如果 a.b 为 nil，跳转到 end
 //	GET_PROPERTY c       ; 5. 否则访问 a.b.c
 //	end:                 ; 6. 链中断时跳转到这里
-//	JUMP_IF_NOT_NIL exit ; 7. 如果结果非 nil，跳过 nil 推送
+//	JUMP_IF_NOT_NIL exit ; 7. 如果结果非 nil，跳过 PUSH_NIL
 //	POP                  ; 8. 弹出结果
 //	PUSH_NIL             ; 9. 推送 nil
 //	exit:                ; 10. 结束
@@ -836,8 +841,6 @@ func (c *compiler) ChainNode(node *ast.ChainNode) {
 		// If chain is used in nil coalescing operator, we can omit
 		// nil push at the end of the chain. The ?? operator will
 		// handle it.
-		//
-		// 在 `??` 运算符中，跳过显式 nil 推送（由 ?? 处理）
 	} else {
 		// We need to put the nil on the stack, otherwise "typed"
 		// nil will be used as a result of the chain.
@@ -1067,6 +1070,48 @@ func (c *compiler) SliceNode(node *ast.SliceNode) {
 // 示例 3：内置函数调用 print("hello")
 //	1. PUSH "hello"        ; 加载参数
 //	2. CALL_BUILTIN print  ; 调用内置函数
+//
+
+// 函数定义
+//	type User struct{}
+//	func (User) Greet(name string) string {
+//		return "Hello, " + name
+//	}
+//
+// 目标表达式
+//  user.greet("Jianwei")
+//
+// 构造 AST
+//
+//	&ast.CallNode{
+//		Callee: &ast.MemberNode{
+//			Node: &ast.IdentifierNode{ // `user`
+//				Value: "user",
+//			},
+//			Property: &ast.StringNode{ // `.greet`
+//				Value: "greet",
+//			},
+//		},
+//		Arguments: []ast.Node{
+//			&ast.StringNode{Value: "xxx"},
+//		},
+//	}
+//
+// 字节码
+//	PUSH   user              // 变量 user 放入栈
+//	GET    user.greet        // 获取方法 greet 的 reflect.Value，包含 receiver
+//	PUSH   "xxx"         	 // 参数压栈
+//	CALL   1                 // 调用 reflect.Value.Call，自动注入 receiver + 参数
+//
+// 调用逻辑
+//	receiver := reflect.ValueOf(User{})
+//	method := receiver.MethodByName("Greet") // 返回 reflect.Value
+//
+//	args := []reflect.Value{
+//		reflect.ValueOf("Jianwei"),
+//	}
+//	out := method.Call(args)
+//	fmt.Println(out[0]) // => Hello, xxx
 
 func (c *compiler) CallNode(node *ast.CallNode) {
 	fn := node.Callee.Type()
@@ -1102,7 +1147,7 @@ func (c *compiler) CallNode(node *ast.CallNode) {
 			// 获取参数类型
 			var in reflect.Type
 			if fn.IsVariadic() && i >= fnNumIn-1 {
-				in = fn.In(fn.NumIn() - 1).Elem() // 可变参数
+				in = fn.In(fn.NumIn() - 1).Elem() // 可变参数的元素类型（如 `...int` 中的 `int`）
 			} else {
 				in = fn.In(i + fnInOffset) // 常规参数
 			}
@@ -1131,12 +1176,11 @@ func (c *compiler) CallNode(node *ast.CallNode) {
 	c.compile(node.Callee)
 
 	// 根据函数类型生成不同的调用指令
-	//  - OpCallTyped：静态类型函数（性能最优）。
-	//  - OpCallFast：快速调用（无反射开销）。
-	//  - OpCall：普通调用（支持反射）。
+	//	- OpCallTyped：匹配精确类型的预注册函数（严格参数/返回值匹配，性能最高）。
+	//	- OpCallFast：匹配宽松但高效的通用函数（可变参数 + interface{}，次优性能）。
+	//	- OpCall：通用反射调用。
 	if c.config != nil {
 		isMethod, _, _ := checker.MethodIndex(c.config.Env, node.Callee)
-
 		if index, ok := checker.TypedFuncIndex(node.Callee.Type(), isMethod); ok {
 			c.emit(OpCallTyped, index)
 			return

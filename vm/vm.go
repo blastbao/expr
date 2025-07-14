@@ -302,27 +302,26 @@ func (vm *VM) Run(program *Program, env any) (_ any, err error) {
 			node := vm.pop()
 			vm.push(runtime.Slice(node, from, to))
 		case OpCall:
-			// 步骤:
-			// 	- 从栈中获取函数：使用 vm.pop() 获取要调用的函数
-			//	- 准备参数：根据参数个数(arg)从栈中弹出参数
-			//	- 处理nil参数：将nil参数转换为对应类型的零值
-			//	- 执行调用：使用反射调用函数
-			//	- 处理返回值：检查错误返回值并将结果压回栈中
+			// 获取待调用的函数，反射得到类型
 			fn := reflect.ValueOf(vm.pop())
+			// 从栈中弹出指定数量（arg）的参数
 			size := arg
 			in := make([]reflect.Value, size)
 			for i := int(size) - 1; i >= 0; i-- {
 				param := vm.pop()
 				if param == nil {
-					in[i] = reflect.Zero(fn.Type().In(i))
+					in[i] = reflect.Zero(fn.Type().In(i)) // 根据参数类型生成反射零值
 				} else {
 					in[i] = reflect.ValueOf(param)
 				}
 			}
+			// 通过反射调用函数
 			out := fn.Call(in)
+			// 如果有两个返回值，且第二个是 error 类型且非 nil → 抛出异常，等价于 ```if err != nil { panic(err) }```
 			if len(out) == 2 && out[1].Type() == errorType && !out[1].IsNil() {
 				panic(out[1].Interface().(error))
 			}
+			// 将第一个返回值（通常是实际的结果）压入虚拟机栈中，如果有多个返回值，其余返回值被丢弃。
 			vm.push(out[0].Interface())
 		case OpCall0:
 			out, err := program.functions[arg]()

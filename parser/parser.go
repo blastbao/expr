@@ -826,6 +826,166 @@ func (p *parser) toFloatNode(number float64) Node {
 //     str | contains "abc" 等价于 contains(str, "abc")
 //     users | filter(age > 18 && contains(name, "John")) 等价于 filter(users, (age > 18 && contains(name, "John"))
 //  3. 参数解析逻辑不同，谓词参数需要通过 parsePredicate 来解析，走特殊执行流程。
+//
+// 示例：
+//
+// 1.
+//
+//	users | filter(.age > 18)
+//
+//	&BuiltinNode{
+//	   Name: "filter",
+//	   Arguments: []Node{
+//		   &IdentifierNode{Value: "users"},
+//		   &BinaryNode{
+//			   Operator: ">",
+//			   Left: &MemberNode{
+//				   Node: &PointerNode{Name: ""},
+//				   Property: &StringNode{Value: "age"},
+//			   },
+//			   Right: &IntegerNode{Value: 18},
+//		   },
+//	   },
+//	   Location: {Line: 1, Column: 1},
+//	}
+//
+// 2. users.filter(.age > 18).map(.name)
+//
+//	&CallNode{
+//	   Callee: &MemberNode{
+//	       Node: &CallNode{
+//	           Callee: &MemberNode{
+//	               Node: &IdentifierNode{Value: "users"},
+//	               Property: &StringNode{Value: "filter"},
+//	           },
+//	           Arguments: []Node{
+//	               &BinaryNode{
+//	                   Operator: ">",
+//	                   Left: &MemberNode{
+//	                       Node: &PointerNode{Name: ""},
+//	                       Property: &StringNode{Value: "age"},
+//	                   },
+//	                   Right: &IntegerNode{Value: 18},
+//	               },
+//	           },
+//	       },
+//	       Property: &StringNode{Value: "map"},
+//	   },
+//	   Arguments: []Node{
+//	       &MemberNode{
+//	           Node: &PointerNode{Name: ""},
+//	           Property: &StringNode{Value: "name"},
+//	       },
+//	   },
+//	   Location: {Line: 1, Column: 1},
+//	}
+//
+// 3.  [1, 2, 3] | filter(> 1)
+//
+//	&BuiltinNode{
+//	   Name: "filter",
+//	   Arguments: []Node{
+//	       &ArrayNode{
+//	           Elements: []Node{
+//	               &NumberNode{Value: 1},
+//	               &NumberNode{Value: 2},
+//	               &NumberNode{Value: 3},
+//	           },
+//	           Location: {Line: 1, Column: 1},
+//	       },
+//	       &BinaryNode{
+//	           Operator: ">",
+//	           Left: &IdentifierNode{
+//	               Value: "$",
+//	               Location: {Line: 1, Column: 17},
+//	           },
+//	           Right: &NumberNode{
+//	               Value: 1,
+//	               Location: {Line: 1, Column: 19},
+//	           },
+//	           Location: {Line: 1, Column: 17},
+//	       },
+//	   },
+//	   Location: {Line: 1, Column: 10},
+//	}
+//
+// 4. obj.method(1, 2)
+//
+//	&CallNode{
+//	   Callee: &MemberNode{
+//	       Node: &IdentifierNode{
+//	           Value: "obj",
+//	           Location: {Line: 1, Column: 1},
+//	       },
+//	       Property: &StringNode{
+//	           Value: "method",
+//	           Location: {Line: 1, Column: 5},
+//	       },
+//	       Location: {Line: 1, Column: 1},
+//	   },
+//	   Arguments: []Node{
+//	       &NumberNode{
+//	           Value: 1,
+//	           Location: {Line: 1, Column: 12},
+//	       },
+//	       &NumberNode{
+//	           Value: 2,
+//	           Location: {Line: 1, Column: 15},
+//	       },
+//	   },
+//	   Location: {Line: 1, Column: 1},
+//	}
+//
+// 5. obj?.method(1)
+//
+//	&ChainNode{
+//	   Node: &CallNode{
+//	       Callee: &MemberNode{
+//	           Node: &IdentifierNode{
+//	               Value: "obj",
+//	               Location: {Line: 1, Column: 1},
+//	           },
+//	           Property: &StringNode{
+//	               Value: "method",
+//	               Location: {Line: 1, Column: 6},
+//	           },
+//	           Location: {Line: 1, Column: 1},
+//	       },
+//	       Arguments: []Node{
+//	           &NumberNode{
+//	               Value: 1,
+//	               Location: {Line: 1, Column: 13},
+//	           },
+//	       },
+//	       Location: {Line: 1, Column: 1},
+//	   },
+//	   Location: {Line: 1, Column: 1},
+//	}
+//
+// 6. obj?.prop ?? "default"
+//
+//	&BinaryNode{
+//	   Operator: "??",
+//	   Left: &ChainNode{
+//	       Node: &MemberNode{
+//	           Node: &IdentifierNode{
+//	               Value: "obj",
+//	               Location: {Line: 1, Column: 1},
+//	           },
+//	           Property: &StringNode{
+//	               Value: "prop",
+//	               Location: {Line: 1, Column: 6},
+//	           },
+//	           Location: {Line: 1, Column: 1},
+//	       },
+//	       Location: {Line: 1, Column: 1},
+//	   },
+//	   Right: &StringNode{
+//	       Value: "default",
+//	       Location: {Line: 1, Column: 13},
+//	   },
+//	   Location: {Line: 1, Column: 10},
+//	}
 func (p *parser) parseCall(token Token, arguments []Node, checkOverrides bool) Node {
 	p.parseDepth++
 	defer func() { p.parseDepth-- }()
