@@ -42,10 +42,10 @@ func combined(l, r Nature) Nature {
 	if isUnknown(l) || isUnknown(r) {
 		return unknown
 	}
-	if isFloat(l) || isFloat(r) {
+	if isFloat(l) || isFloat(r) { // 任一操作数为 float 则整体为 float
 		return floatNature
 	}
-	return integerNature
+	return integerNature // 否则都视为 integer
 }
 
 func anyOf(nt Nature, fns ...func(Nature) bool) bool {

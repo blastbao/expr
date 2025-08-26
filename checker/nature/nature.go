@@ -11,6 +11,12 @@ var (
 	unknown = Nature{}
 )
 
+// Nature 用于描述 Go 类型信息的结构体，主要用于类型检查和反射操作。
+// 它是对 Go 标准库 reflect.Type的扩展和封装，提供了更丰富的类型信息和操作方法。
+//
+// - 不仅包含基础类型信息，还包含语义信息（如是否是方法、字段索引等）
+// - 支持自定义 Map 字段类型映射
+// - 支持数组元素的增强类型描述
 type Nature struct {
 	Type            reflect.Type      // Type of the value. If nil, then value is unknown.
 	Func            *builtin.Function // Used to pass function type from callee to CallNode.
@@ -25,24 +31,20 @@ type Nature struct {
 	FieldIndex      []int             // Index of field in type.
 }
 
-type Comments struct {
-	Type            reflect.Type      // 值的类型（比如 int、[]string、map[string]int）
-	Func            *builtin.Function // 如果是内置函数，这里保留函数定义信息
-	ArrayOf         *Nature           // 如果是数组/切片，其元素类型
-	PredicateOut    *Nature           // 如果是谓词函数，返回类型（常用于过滤场景）
-	Fields          map[string]Nature // 如果是 Map，用于描述键 -> 值类型映射
-	DefaultMapValue *Nature           // Map 默认值类型（没有 key 命中时）
-	Strict          bool              // 是否为严格 map（键固定，不能任意添加）
-	Nil             bool              // 是否为 nil 值
-	Method          bool              // 是否是通过 MethodByName 获得的 method
-	MethodIndex     int               // 方法索引（对应 reflect.Type.Method(index)）
-	FieldIndex      []int             // 如果是 struct 字段，其 index 路径（嵌套字段）
+// Kind 获取底层反射类型的 Kind
+func (n Nature) Kind() reflect.Kind {
+	if n.Type != nil {
+		return n.Type.Kind()
+	}
+	return reflect.Invalid
 }
 
+// IsAny 是否是任意类型（interface{}）
 func (n Nature) IsAny() bool {
 	return n.Kind() == reflect.Interface && n.NumMethods() == 0
 }
 
+// IsUnknown 是否是未知类型
 func (n Nature) IsUnknown() bool {
 	switch {
 	case n.Type == nil && !n.Nil:
@@ -68,13 +70,7 @@ func (n Nature) Deref() Nature {
 	return n
 }
 
-func (n Nature) Kind() reflect.Kind {
-	if n.Type != nil {
-		return n.Type.Kind()
-	}
-	return reflect.Invalid
-}
-
+// Key 获取 Map 的 Key 的反射类型，非 Map 返回 unknown
 func (n Nature) Key() Nature {
 	if n.Kind() == reflect.Map {
 		return Nature{Type: n.Type.Key()}
@@ -82,17 +78,72 @@ func (n Nature) Key() Nature {
 	return unknown
 }
 
+// 为什么需要 DefaultMapValue/ArrayOf ？
+//
+// 1. 弥补反射限制：
+//	- 标准反射只能告诉我们 Map/Array 的值类型是 interface{}，但不知道实际存储的是什么具体类型。
+// 2. 优化性能：
+//	- 避免在知道实际类型的情况下仍进行频繁的类型断言
+//
+// ArrayOf
+//
+// 用途：表示 数组或切片的元素类型。
+// 优点：
+//	- 避免反射开销：不必每次调用 Elem() 都用 reflect.Type.Elem() 去获取类型。
+//	- 支持嵌套类型：可以递归保存数组内部元素的详细 Nature，比如数组里面的 Map、Struct 等。
+//	- 方便类型推断：表达式引擎可以直接通过 ArrayOf 获取元素类型，无需重新解析。
+//
+// DefaultMapValue
+//
+// 用途：表示 Map 的默认 value 类型。
+// 优点：
+//	- 支持默认值类型推断：访问不存在的 key 也能知道类型。
+//	- 减少重复计算：DSL 解析器不需要每次访问 Map 时去创建新的 Nature。
+//	- 统一访问接口：表达式引擎可以直接用 Elem() 返回 DefaultMapValue，保证访问 Map 时类型一致。
+
+// 使用说明：
+//
+// 1. Map 类型描述
+//	mapType := Nature{
+//		Type: reflect.TypeOf(map[string]interface{}{}), 	// 表示一个 map[string]interface{}
+//		DefaultMapValue: &Nature{Type: reflect.TypeOf("")},	// 表示值是字符串类型
+//	}
+//	elemType := mapType.Elem() // 此时 Elem() 会返回 Nature{Type: string} 类型而非 interface{}
+//
+// 2. Slice 类型描述
+//	sliceType := Nature{
+//    	Type: reflect.TypeOf([]interface{}{}),     // 表示一个 []interface{}，但实际存储的是整数
+//    	ArrayOf: &Nature{Type: reflect.TypeOf(0)},
+//	}
+//	elemType := sliceType.Elem() // 此时 Elem() 会返回 Nature{Type: int} 类型而非 interface{}
+//
+// 3. Map 类型描述中，DefaultMapValue 和 Fields 可以一起使用提供更精确的类型信息：
+//	configNature := Nature{
+//	   Type: reflect.TypeOf((map[string]interface{})(nil)),
+//	   Fields: map[string]Nature{
+//		   "timeout": {Type: reflect.TypeOf(0)},          // timeout 是 int
+//		   "enabled": {Type: reflect.TypeOf(true)},       // enabled 是 bool
+//		   "user":    {Type: reflect.TypeOf(User{})},     // user 是 User
+//	   },
+//	   DefaultMapValue: &Nature{Type: reflect.TypeOf("")}, // 其他值默认是 string
+//	}
+
+// Elem 获取容器类型（指针、映射、数组或切片）的元素类型。
+// Elem 适用于：
+//   - 指针: *T → T
+//   - 数组/切片: []T → T
+//   - Map: map[K]V → V
 func (n Nature) Elem() Nature {
 	switch n.Kind() {
 	case reflect.Ptr:
 		return Nature{Type: n.Type.Elem()}
 	case reflect.Map:
-		if n.DefaultMapValue != nil {
+		if n.DefaultMapValue != nil { // 默认的 Map 值类型
 			return *n.DefaultMapValue
 		}
 		return Nature{Type: n.Type.Elem()}
 	case reflect.Array, reflect.Slice:
-		if n.ArrayOf != nil {
+		if n.ArrayOf != nil { // 默认的 Array/Slice 值类型
 			return *n.ArrayOf
 		}
 		return Nature{Type: n.Type.Elem()}
@@ -100,6 +151,7 @@ func (n Nature) Elem() Nature {
 	return unknown
 }
 
+// AssignableTo 底层反射类型兼容性检查
 func (n Nature) AssignableTo(nt Nature) bool {
 	if n.Nil {
 		// Untyped nil is assignable to any interface, but implements only the empty interface.
@@ -121,14 +173,17 @@ func (n Nature) NumMethods() int {
 }
 
 func (n Nature) MethodByName(name string) (Nature, bool) {
+	// 如果当前 Nature 没有绑定具体类型，直接返回 unknown 。
 	if n.Type == nil {
 		return unknown, false
 	}
+	// 反射查找方法
 	method, ok := n.Type.MethodByName(name)
 	if !ok {
 		return unknown, false
 	}
 
+	// 对于接口类型，其方法没有接收者（receiver），不视为 Method ，不使用 MethodIndex 。
 	if n.Type.Kind() == reflect.Interface {
 		// In case of interface type method will not have a receiver,
 		// and to prevent checker decreasing numbers of in arguments
@@ -137,8 +192,11 @@ func (n Nature) MethodByName(name string) (Nature, bool) {
 		// Also, we can not use m.Index here, because it will be
 		// different indexes for different types which implement
 		// the same interface.
-		return Nature{Type: method.Type}, true
+		return Nature{
+			Type: method.Type,
+		}, true
 	} else {
+		// 对于普通类型（如结构体），设置 Method/MethodIndex ，方便后续快速定位
 		return Nature{
 			Type:        method.Type,
 			Method:      true,
@@ -187,7 +245,10 @@ func (n Nature) FieldByName(name string) (Nature, bool) {
 		return unknown, false
 	}
 	field, ok := fetchField(n.Type, name)
-	return Nature{Type: field.Type, FieldIndex: field.Index}, ok
+	return Nature{
+		Type:       field.Type,
+		FieldIndex: field.Index,
+	}, ok
 }
 
 func (n Nature) PkgPath() string {
@@ -197,6 +258,24 @@ func (n Nature) PkgPath() string {
 	return n.Type.PkgPath()
 }
 
+// IsFastMap 判断是否 fast map 类型。
+//
+// map[string]interface{} 在 Go 中具有特殊的优化：
+//
+// - 哈希计算优化
+//   - 使用高效的哈希算法，现代 CPU 的 SIMD 指令集（如 SSE4.2）对字符串哈希（如 CRC32）有硬件优化，进一步加速哈希计算
+//   - 缓存哈希值，避免重复计算
+//
+// - 内存布局优化
+//   - 使用更紧凑的内存布局
+//
+// - 编译器优化
+//   - 为 map[string]interface{} 生成特化代码，比通用的 mapaccess2 快 20-30%
+//   - 小 map 的操作可能被完全内联
+//
+// - 内存管理优化
+//   - Go 的 string 是不可变的，底层数据通常连续存储，CPU 缓存预取（Cache Prefetching）更高效。
+//   - 短字符串（如字段名）通常分配在栈或静态存储区，无堆分配开销，减少 GC 开销。
 func (n Nature) IsFastMap() bool {
 	if n.Type == nil {
 		return false
@@ -209,6 +288,11 @@ func (n Nature) IsFastMap() bool {
 	return false
 }
 
+// Get 方法实现了智能查找顺序：
+//   - 先查找方法
+//   - 如果是结构体，查找字段
+//   - 如果是 Map，查找预定义的字段映射
+//
 // Get 尝试从 Nature 中获取名为 name 的方法或字段
 // 1. 判断类型是否为空：如果当前 Nature 为空类型（没有绑定任何 Go 类型），直接返回失败。
 // 2. 优先查找方法：调用 MethodByName 方法查找是否有同名方法。
@@ -220,13 +304,10 @@ func (n Nature) Get(name string) (Nature, bool) {
 	if n.Type == nil {
 		return unknown, false
 	}
-
 	if m, ok := n.MethodByName(name); ok {
 		return m, true
 	}
-
 	t := deref.Type(n.Type)
-
 	switch t.Kind() {
 	case reflect.Struct:
 		if f, ok := fetchField(t, name); ok {
@@ -243,6 +324,10 @@ func (n Nature) Get(name string) (Nature, bool) {
 	return unknown, false
 }
 
+// All 返回该类型所有可访问的成员（方法和字段）的完整映射，包含：
+//   - 所有方法：类型定义的方法
+//   - 结构体字段：如果是结构体，包含所有字段
+//   - Map 键值对：如果是 Map，包含预定义的字段映射
 func (n Nature) All() map[string]Nature {
 	table := make(map[string]Nature)
 
@@ -260,7 +345,6 @@ func (n Nature) All() map[string]Nature {
 	}
 
 	t := deref.Type(n.Type)
-
 	switch t.Kind() {
 	case reflect.Struct:
 		for name, nt := range StructFields(t) {
@@ -269,7 +353,6 @@ func (n Nature) All() map[string]Nature {
 			}
 			table[name] = nt
 		}
-
 	case reflect.Map:
 		for key, nt := range n.Fields {
 			if _, ok := table[key]; ok {

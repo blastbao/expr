@@ -470,23 +470,33 @@ var Builtins = []*Function{
 		Types: types(new(func(string) string)),
 	},
 	{
+		//  ### 用法
+		//	now()                    			// 返回当前本地时间
+		//	now(time.UTC)           			// 返回UTC当前时间
+		//	now(time.FixedZone("CST", 8*3600))  // 返回东八区时间
 		Name: "now",
+		// 功能说明：
+		//	- 无参数调用：返回当前本地时间
+		//	- 带时区参数：返回指定时区的当前时间
 		Func: func(args ...any) (any, error) {
-			if len(args) == 0 {
+			if len(args) == 0 { // 无参数：返回当前本地时间
 				return time.Now(), nil
 			}
-			if len(args) == 1 {
+			if len(args) == 1 { // 带时区参数：返回指定时区时间
 				if tz, ok := args[0].(*time.Location); ok {
 					return time.Now().In(tz), nil
 				}
 			}
 			return nil, fmt.Errorf("invalid number of arguments (expected 0, got %d)", len(args))
 		},
+		// 验证逻辑：
+		//	- 检查参数数量（0或1个）
+		//	- 检查参数类型（必须是 *time.Location）
 		Validate: func(args []reflect.Type) (reflect.Type, error) {
-			if len(args) == 0 {
+			if len(args) == 0 { // 无参数：返回时间类型
 				return timeType, nil
 			}
-			if len(args) == 1 {
+			if len(args) == 1 { // 参数是时区类型：返回时间类型
 				if args[0] != nil && args[0].AssignableTo(locationType) {
 					return timeType, nil
 				}

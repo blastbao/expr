@@ -9,6 +9,62 @@ import (
 	"github.com/expr-lang/expr/types"
 )
 
+// Env 将任意类型的 env 转换为对应的 Nature 类型描述。
+//
+// 转换逻辑：
+//
+//	nil → 空 map
+//	types.Map → 直接转换
+//	struct → 记录类型，延迟字段解析（用 All()）
+//	map → 遍历 key/value，把每个 value 转成 Nature
+//	其它类型 → panic
+//
+// 示例：
+//  1. nil
+//     env := nil
+//     nature := Env(env)
+//  返回:
+// 	{
+// 		Type: map[string]interface{},
+//		Strict: true,
+//		Fields: {},
+//	}
+//
+//  2. struct
+//
+//	type Config struct {
+//	   Timeout int
+//	   Enabled bool
+//	}
+//	env := Config{ Timeout: 30, Enabled: true }
+//	nature := Env(env)
+//
+//	返回:
+//	{
+//		Type: Config,
+//		Strict: true,
+//	}
+//
+//  3. map
+//
+//  env := map[string]interface{}{
+//    "timeout": 30,
+//    "enabled": true,
+//    "user":    User{Name: "John"},
+//  }
+//  nature := Env(env)
+//
+//  返回：
+//  {
+// 		Type: map[string]interface{},
+//		Strict: true,
+//		Fields: {
+//		  "timeout": {Type: int},
+//		  "enabled": {Type: bool},
+//		  "user":    {Type: User}
+//		},
+//	}
+
 func Env(env any) Nature {
 	if env == nil {
 		return Nature{
@@ -46,11 +102,9 @@ func Env(env any) Nature {
 			}
 
 			face := elem.Interface()
-
 			switch face := face.(type) {
 			case types.Map:
 				n.Fields[key.String()] = face.Nature()
-
 			default:
 				if face == nil {
 					n.Fields[key.String()] = Nature{Nil: true}

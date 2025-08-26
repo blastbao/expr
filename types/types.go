@@ -10,9 +10,9 @@ import (
 
 // Type is a type that can be used to represent a value.
 type Type interface {
-	Nature() Nature
-	Equal(Type) bool
-	String() string
+	Nature() Nature  // 返回类型的 Nature 元信息
+	Equal(Type) bool // 判断两个 Type 是否相等
+	String() string  // 返回字符串形式的类型名
 }
 
 var (
@@ -41,27 +41,29 @@ func TypeOf(v any) Type {
 	return rtype{t: reflect.TypeOf(v)}
 }
 
+// anyType 表示任意类型（Go 中的 interface{}）
 type anyType struct{}
 
 func (anyType) Nature() Nature {
 	return Nature{Type: nil}
-}
+} // 返回空，没有特定类型
 
 func (anyType) Equal(t Type) bool {
 	return true
-}
+} // any 能和任意类型匹配，Equal 永远返回 true
 
 func (anyType) String() string {
 	return "any"
 }
 
+// nilType 表示空类型
 type nilType struct{}
 
 func (nilType) Nature() Nature {
 	return Nature{Nil: true}
 }
 
-func (nilType) Equal(t Type) bool {
+func (nilType) Equal(t Type) bool { // nilType 与 Any 或其它 nilType 相等
 	if t == Any {
 		return true
 	}
@@ -72,6 +74,7 @@ func (nilType) String() string {
 	return "nil"
 }
 
+// rtype 是 reflect.Type 的直接封装
 type rtype struct {
 	t reflect.Type
 }
@@ -95,18 +98,20 @@ func (r rtype) String() string {
 }
 
 // Map represents a map[string]any type with defined keys.
+//
+// Map 是一种增强版的 map[string]any ，允许指定每个 key 的类型。
 type Map map[string]Type
 
-const Extra = "[[__extra_keys__]]"
+const Extra = "[[__extra_keys__]]" // 标记 Map 是否允许额外的未知 key（非严格模式）
 
 func (m Map) Nature() Nature {
 	nt := Nature{
 		Type:   reflect.TypeOf(map[string]any{}),
-		Fields: make(map[string]Nature, len(m)),
-		Strict: true,
+		Fields: make(map[string]Nature, len(m)), // 存储已确定的 key 的 Nature 信息
+		Strict: true,                            // 严格模式（默认）
 	}
 	for k, v := range m {
-		if k == Extra {
+		if k == Extra { // 如果允许额外的未知 key ，意味着非严格模式，设置 DefaultMapValue 表示这些 key 的值类型。
 			nt.Strict = false
 			natureOfDefaultValue := v.Nature()
 			nt.DefaultMapValue = &natureOfDefaultValue

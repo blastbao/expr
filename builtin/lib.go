@@ -369,20 +369,51 @@ func flatten(arg reflect.Value) []any {
 	return ret
 }
 
+// ### 特点
+//
+//	多类型支持：处理数组、切片、字符串、map、结构体等多种数据类型
+//	方法优先：如果对象有方法且索引是字符串，优先尝试调用方法
+//	安全访问：进行边界检查和有效性检查，避免 panic
+//	灵活索引：支持负索引（从末尾开始）和多种键类型
+//	Tag 支持：结构体字段支持通过 expr tag 进行别名访问
+//	错误处理：返回 error 而不是 panic，更加友好
+//
+// ### 示例
+//
+//	// 数组访问
+//	get([]int{1, 2, 3}, 1)  // 返回 2
+//
+//	// Map 访问
+//	get(map[string]int{"a": 1}, "a")  // 返回 1
+//
+//	// 结构体字段访问
+//	type User struct {
+//		Name string `expr:"username"`
+//	}
+//	get(User{Name: "John"}, "username")  // 返回 "John"
+//
+//	// 方法调用
+//	get(time.Now(), "String")  // 返回当前时间的字符串表示
 func get(params ...any) (out any, err error) {
+	// from：源对象
+	// i：索引或字段名
+	// v：源对象值
 	from := params[0]
 	i := params[1]
 	v := reflect.ValueOf(from)
 
+	// 如果 from 是 nil，直接返回 nil
 	if from == nil {
 		return nil, nil
 	}
-
+	// 如果 v 的 Kind 是 Invalid（无法识别），直接 panic
 	if v.Kind() == reflect.Invalid {
 		panic(fmt.Sprintf("cannot fetch %v from %T", i, from))
 	}
 
 	// Methods can be defined on any type.
+	//
+	// 如果对象有方法，且 i 是字符串（方法名），尝试获取该方法并以 interface{} 返回
 	if v.NumMethod() > 0 {
 		if methodName, ok := i.(string); ok {
 			method := v.MethodByName(methodName)
@@ -396,17 +427,19 @@ func get(params ...any) (out any, err error) {
 	case reflect.Array, reflect.Slice, reflect.String:
 		index := runtime.ToInt(i)
 		l := v.Len()
+		// 支持负索引（类似 Python 的 -1 表示最后一个元素）
 		if index < 0 {
 			index = l + index
 		}
+		// 如果索引合法，返回对应元素值
 		if 0 <= index && index < l {
 			value := v.Index(index)
 			if value.IsValid() {
 				return value.Interface(), nil
 			}
 		}
-
 	case reflect.Map:
+		// 如果 i 为 nil，使用 map 的 零值 key 访问，否则使用 i 转为 reflect.Value 去查找
 		var value reflect.Value
 		if i == nil {
 			value = v.MapIndex(reflect.Zero(v.Type().Key()))
@@ -418,6 +451,7 @@ func get(params ...any) (out any, err error) {
 		}
 
 	case reflect.Struct:
+		// i 必须是字符串（字段名），优先匹配字段 expr tag，其次匹配字段名
 		fieldName := i.(string)
 		value := v.FieldByNameFunc(func(name string) bool {
 			field, _ := v.Type().FieldByName(name)

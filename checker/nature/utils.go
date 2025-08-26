@@ -59,7 +59,7 @@ func fetchField(t reflect.Type, name string) (reflect.StructField, bool) {
 }
 
 // StructFields 从结构体类型 reflect.Type 中提取字段信息，包括：
-//   - 支持结构体 tag（通过 expr 标签指定字段名）；
+//   - 支持根据 `expr` tag 获取字段名（不存在则使用默认字段名）；
 //   - 支持匿名嵌套字段（递归解析嵌入的 struct）；
 func StructFields(t reflect.Type) map[string]Nature {
 	table := make(map[string]Nature)

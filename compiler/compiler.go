@@ -371,10 +371,10 @@ func (c *compiler) NilNode(_ *ast.NilNode) {
 //
 // 步骤：
 //  1. 检查标识符是否是局部变量（函数参数、let 声明等），生成 OpLoadVar 操作码，并传入变量索引，然后返回。
-//  2. 如果标识符是特殊变量 "$env"，生成 OpLoadEnv 操作码（加载环境变量），然后返回。"$env" 代表用户传入的运行时环境，通常用于访问全局环境。
-//  3. 声明一个 env 变量，类型为 Nature ，如果编译器的配置（c.config）不为空，从配置中获取 c.config.Env 并赋值给 env 。
+//  2. 如果标识符是特殊变量 "$env"，生成 OpLoadEnv 操作码（加载环境变量）后返回。"$env" 代表用户传入的运行时环境，通常用于访问全局环境。
+//  3. 声明一个 Nature 类型 env 变量，如果编译器的配置（c.config）不为空，从配置中获取 c.config.Env 并赋值给 env 。
 //  4. 根据 env 的类型和标识符的不同情况，生成不同的操作码：
-//     4.1 如果 env 是 map[string]interface{} 类型，先将标识符作为常量添加到常量池中，然后生成 OpLoadFast 操作码，并传入常量索引。
+//     4.1 如果 env 是 map[string]interface{} 类型(FastMap)，先将标识符(node.Value)作为常量添加到常量池中，然后生成 OpLoadFast 操作码，并传入常量索引。
 //     4.2 如果 env 是 struct ，尝试在 env 中查找字段，若找到会返回字段名、字段的 indexes ，然后生成 OpLoadField 操作码。
 //     4.3 如果 env 是 struct ，尝试在 env 中查找方法，若找到会返回方法名、方法的 index ，然后生成 OpLoadMethod 操作码。
 //     4.4 如果 env 是其它类型，把这个标识符当成常量名处理，先添加到常量池，然后生成 OpLoadConst 操作码，并传入常量索引。

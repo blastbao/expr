@@ -49,6 +49,7 @@ func FieldIndex(env Nature, node ast.Node) (bool, []int, string) {
 //	env := Nature{
 //		Value: reflect.ValueOf(Env{})
 //	}
+//
 //	node := &ast.IdentifierNode{
 //		Value: "Print"
 //	}
