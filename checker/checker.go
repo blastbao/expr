@@ -23,23 +23,44 @@ import (
 
 // Run visitors in a given config over the given tree
 // runRepeatable controls whether to filter for only vistors that require multiple passes or not
+//
+// Run 函数保证：
+//   - 普通 visitor 只跑一次。
+//   - 可重复 visitor 会多次执行，直到 ShouldRepeat() 返回 false。
+//
+// 某些语法树修改可能需要多轮才能完成（例如，先展开某个语法结构，才能继续处理展开后的新节点），因此需要支持重复执行。
 func runVisitors(tree *parser.Tree, config *conf.Config, runRepeatable bool) {
 	for {
 		more := false
 		for _, v := range config.Visitors {
+
 			// We need to perform types check, because some visitors may rely on
 			// types information available in the tree.
+			//
+			// 每次执行 visitor 前做一次类型检查，因为某些 visitor 可能依赖 AST 上的类型信息。
+			// 这里忽略返回值和错误，只是为了刷新类型信息。
 			_, _ = Check(tree, config)
 
+			// 判断 visitor 是否实现了 repeatable 接口，若是说明它可能需要多次遍历 AST 才能完全生效。
 			r, repeatable := v.(interface {
 				Reset()
 				ShouldRepeat() bool
 			})
 
+			// 分两种情况：
+			//	可重复 visitor (repeatable == true)
+			//		只在 runRepeatable == true 时执行。
+			//		执行前 Reset() 重置状态。
+			//		遍历 AST 并应用 visitor。
+			//		判断是否需要再次处理 AST。
+			//		more = more || r.ShouldRepeat() 保证只要有一个 visitor 需要重复就继续循环。
+			//	普通 visitor (repeatable == false)
+			//		只在 runRepeatable == false 时执行。
+			//		直接遍历 AST 应用 visitor。
 			if repeatable {
 				if runRepeatable {
-					r.Reset()
-					ast.Walk(&tree.Node, v)
+					r.Reset()               // 重置 visitor 状态
+					ast.Walk(&tree.Node, v) // 遍历语法树并应用 visitor
 					more = more || r.ShouldRepeat()
 				}
 			} else {
@@ -49,6 +70,7 @@ func runVisitors(tree *parser.Tree, config *conf.Config, runRepeatable bool) {
 			}
 		}
 
+		// 如果没有 visitor 表示需要重复处理 AST (more == false)，就跳出外层循环。
 		if !more {
 			break
 		}
@@ -58,18 +80,24 @@ func runVisitors(tree *parser.Tree, config *conf.Config, runRepeatable bool) {
 // ParseCheck parses input expression and checks its types. Also, it applies
 // all provided patchers. In case of error, it returns error with a tree.
 func ParseCheck(input string, config *conf.Config) (*parser.Tree, error) {
+	// 对输入 input 进行语法解析，得到 AST 语法树。
 	tree, err := parser.ParseWithConfig(input, config)
 	if err != nil {
 		return tree, err
 	}
 
+	// 对 AST 语法树执行 visitor/patcher（访问器/补丁器）。
+	// 分两步跑：
+	//	- 先运行那些不能重复运行的（false），也就是单次 patch 的 visitor 。
+	//	- 再运行需要多次修正的（true），比如运算符 patch（有些地方需要迭代多次调整 AST 才能确定正确结构，比如运算符优先级和结合性）。
 	if len(config.Visitors) > 0 {
-		// Run all patchers that dont support being run repeatedly first
+		// Run all patchers that don't support being run repeatedly first
 		runVisitors(tree, config, false)
-
 		// Run patchers that require multiple passes next (currently only Operator patching)
 		runVisitors(tree, config, true)
 	}
+
+	// 对 AST 做类型检查。
 	_, err = Check(tree, config)
 	if err != nil {
 		return tree, err
@@ -80,32 +108,36 @@ func ParseCheck(input string, config *conf.Config) (*parser.Tree, error) {
 
 // Check checks types of the expression tree. It returns type of the expression
 // and error if any. If config is nil, then default configuration will be used.
+//
+// Check 函数是类型检查的入口点，它接收 AST 树和配置，进行全面的类型检查，并返回表达式的最终类型。
 func Check(tree *parser.Tree, config *conf.Config) (reflect.Type, error) {
 	if config == nil {
 		config = conf.New(nil)
 	}
 
 	v := &checker{config: config}
-
 	nt := v.visit(tree.Node)
 
 	// To keep compatibility with previous versions, we should return any, if nature is unknown.
+	// 兼容性处理：未知类型返回 interface{}
 	t := nt.Type
 	if t == nil {
 		t = anyType
 	}
 
+	// 如果检查过程中遇到语法或类型错误，报错返回
 	if v.err != nil {
 		return t, v.err.Bind(tree.Source)
 	}
 
+	// 配置里声明了期望类型
 	if v.config.Expect != reflect.Invalid {
+		// 如果允许任何类型且当前类型未知，则通过检查，否则必须完全匹配期望类型
 		if v.config.ExpectAny {
 			if isUnknown(nt) {
 				return t, nil
 			}
 		}
-
 		switch v.config.Expect {
 		case reflect.Int, reflect.Int64, reflect.Float64:
 			if !isNumber(nt) {
@@ -697,7 +729,7 @@ func (v *checker) functionReturnType(node *ast.CallNode) Nature {
 	// 如果 nt 中 Func 非空，说明这是个已知的、预定义的函数（内置函数、用户注册函数、特殊优化函数），直接调用 checkFunction 检查参数并返回类型。
 	// 这是对已知的、预定义的函数的简化处理，而普通的 func 走 reflect.Func 分支。
 	//
-	// 设置 nt.Func 的地方在 checker.ident() 函数中。
+	// 备注：设置 nt.Func 的地方在 checker.ident() 函数中。
 	if nt.Func != nil {
 		return v.checkFunction(nt.Func, node, node.Arguments)
 	}
@@ -1760,23 +1792,42 @@ func (v *checker) PointerNode(node *ast.PointerNode) Nature {
 	return v.error(node, "unknown pointer #%v", node.Name)
 }
 
+// VariableDeclaratorNode 用于在编译期验证变量声明的合法性，并确定声明表达式的类型。
+//
+// 对应语法：let 变量名 = 初始值; 后续表达式
 func (v *checker) VariableDeclaratorNode(node *ast.VariableDeclaratorNode) Nature {
+	// 1. 对变量名 `node.Name` 进行重名检查
+
+	// 检查是否与环境变量重名
 	if _, ok := v.config.Env.Get(node.Name); ok {
 		return v.error(node, "cannot redeclare %v", node.Name)
 	}
+	// 检查是否与已定义函数重名
 	if _, ok := v.config.Functions[node.Name]; ok {
 		return v.error(node, "cannot redeclare function %v", node.Name)
 	}
+	// 检查是否与内置变量/函数重名
 	if _, ok := v.config.Builtins[node.Name]; ok {
 		return v.error(node, "cannot redeclare builtin %v", node.Name)
 	}
+	// 检查是否与当前作用域中已声明的变量重名
 	if _, ok := v.lookupVariable(node.Name); ok {
 		return v.error(node, "cannot redeclare variable %v", node.Name)
 	}
+
+	// 2. 推导变量初始值 `node.Value` 的类型信息
 	varNature := v.visit(node.Value)
+
+	// 3. 临时添加变量到新作用域，让后续表达式 node.Expr 能访问到这个新变量
 	v.varScopes = append(v.varScopes, varScope{node.Name, varNature})
+
+	// 4. 推导表达式 `node.Expr` 的类型信息
 	exprNature := v.visit(node.Expr)
+
+	// 5. 移除变量作用域，恢复作用域状态。
 	v.varScopes = v.varScopes[:len(v.varScopes)-1]
+
+	// 6. 返回表达式类型
 	return exprNature
 }
 
@@ -1791,6 +1842,15 @@ func (v *checker) SequenceNode(node *ast.SequenceNode) Nature {
 	return last
 }
 
+// lookupVariable 根据变量名查找变量作用域。
+//
+// 返回值：
+//   - varScope：找到的变量作用域信息（如果有）。
+//   - bool：是否找到该变量。
+//
+// v.varScopes 是一个栈（slice），存储了当前所有变量的作用域。
+// 这里倒序遍历（从最新的作用域往外找），保证最近的定义优先（符合词法作用域规则）。
+// 如果找到了同名变量，就直接返回它的作用域信息和 true ；如果没找到，返回一个空的 varScope 和 false，表示查找失败。
 func (v *checker) lookupVariable(name string) (varScope, bool) {
 	for i := len(v.varScopes) - 1; i >= 0; i-- {
 		if v.varScopes[i].name == name {
@@ -1800,15 +1860,58 @@ func (v *checker) lookupVariable(name string) (varScope, bool) {
 	return varScope{}, false
 }
 
+// ConditionalNode 对 cond ? expr1 : expr2 表达式进行类型检查和推导。
+//
+// 示例
+//
+//	示例1：相同类型
+//	age > 18 ? "adult" : "minor"
+//	t1 = string ("adult")
+//	t2 = string ("minor")
+//	t1.AssignableTo(t2) = true
+//	返回: string
+//
+//	示例2：数值类型提升
+//	flag ? 5 : 3.14
+//	t1 = int (5)
+//	t2 = float64 (3.14) // int 通常可以赋值给 float64
+//	返回: float64
+//
+//	示例3：接口兼容
+//	condition ? &User{} : nil
+//	t1 = *User
+//	t2 = nil
+//	返回: *User
+//
+//	示例4：类型不兼容
+//	flag ? "hello" : 42
+//	t1 = string
+//	t2 = int
+//	t1.AssignableTo(t2) = false
+//	返回: unknown
+//
+//	错误示例1：非布尔条件
+//	5 ? "a" : "b"
+//	错误: "non-bool expression (type int) used as condition"
+//
+//	错误示例2：完全不兼容的类型
+//	condition ? "string" : []int{1, 2, 3}
+//	返回: unknown
 func (v *checker) ConditionalNode(node *ast.ConditionalNode) Nature {
+
+	// 条件表达式必须是布尔类型
 	c := v.visit(node.Cond)
 	if !isBool(c) && !isUnknown(c) {
 		return v.error(node.Cond, "non-bool expression (type %v) used as condition", c)
 	}
 
+	// 检查两个分支的类型
 	t1 := v.visit(node.Exp1)
 	t2 := v.visit(node.Exp2)
 
+	// 处理 nil
+	//  - 单边 nil : 如果一边是 nil 另一边不是，返回非 nil 的类型
+	//  - 双边 nil : 如果两边都是 nil ，返回 nil 类型
 	if isNil(t1) && !isNil(t2) {
 		return t2
 	}
@@ -1818,15 +1921,24 @@ func (v *checker) ConditionalNode(node *ast.ConditionalNode) Nature {
 	if isNil(t1) && isNil(t2) {
 		return nilNature
 	}
+
+	// 处理非 nil
+	//	- 如果类型兼容( t1 可以赋值给 t2 )，返回 t1 的类型
 	if t1.AssignableTo(t2) {
 		return t1
 	}
 	return unknown
 }
 
+// ArrayNode 检查数组字面量（如 [1, 2, 3] 或 ["a", "b", "c"]）的元素类型一致性并推导数组类型。
+//
+// ast.ArrayNode：表示源代码中的一个数组字面量节点，例如：
+//   - [1, 2, 3]
+//   - ["a", "b", "c"]
+//   - [1, "a", true]
 func (v *checker) ArrayNode(node *ast.ArrayNode) Nature {
-	var prev Nature
-	allElementsAreSameType := true
+	var prev Nature                // 保存上一个元素的类型
+	allElementsAreSameType := true // 标记数组中所有元素是否类型一致
 	for i, node := range node.Nodes {
 		curr := v.visit(node)
 		if i > 0 {
@@ -1836,12 +1948,28 @@ func (v *checker) ArrayNode(node *ast.ArrayNode) Nature {
 		}
 		prev = curr
 	}
+
+	// 如果所有元素类型一致，返回 arrayOf(prev)，即有具体元素类型的数组。
+	//	- 如 [1, 2, 3] → []int
+	//	- 如 ["a", "b"] → []string
+	// 否则，返回一个通配数组。
+	//	- 如 [1, "a", true] → []any
 	if allElementsAreSameType {
 		return arrayOf(prev)
 	}
 	return arrayNature
 }
 
+// MapNode 对 Map 字面量进行类型检查。
+//
+// ast.MapNode 表示 AST 里的 Map 字面量，比如：{"a": 1, "b": 2} ，包含一组 Pairs，每个 pair 是一个键值对。
+//
+// 先对每个键值对调用 visit，进入递归检查：
+//   - 会先检查 key 表达式是否合法
+//   - 再检查 value 表达式是否合法
+//
+// 但这里没有返回值（类型信息）保存下来，只是为了触发验证。
+// 最后统一返回 mapNature
 func (v *checker) MapNode(node *ast.MapNode) Nature {
 	for _, pair := range node.Pairs {
 		v.visit(pair)
@@ -1849,6 +1977,7 @@ func (v *checker) MapNode(node *ast.MapNode) Nature {
 	return mapNature
 }
 
+// PairNode 对键值对进行类型检查
 func (v *checker) PairNode(node *ast.PairNode) Nature {
 	v.visit(node.Key)
 	v.visit(node.Value)
