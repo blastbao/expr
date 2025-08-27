@@ -523,7 +523,7 @@ func (v *checker) ChainNode(node *ast.ChainNode) Nature {
 	return v.visit(node.Node)
 }
 
-// MemberNode 负责检查 x.y 或 x["y"] 这样的访问是否合法，并返回对应字段/方法的类型 (Nature)。
+// MemberNode 根据基节点类型（如 $env、map、数组、结构体等）和属性信息推断成员类型，返回对应字段/方法的类型 (Nature) 或者报错。
 func (v *checker) MemberNode(node *ast.MemberNode) Nature {
 	// 如果基节点是 $env ，则属性必须是字符串字面量：$env."foo" ，否则返回 unknown 。
 	// 根据属性名 "foo" 去 $env 中查找（不启用 builtins/functions），如果加了 optional 标志（如 $env?."foo"），即使不存在也不报错。
@@ -1319,7 +1319,7 @@ func (v *checker) checkFunction(f *builtin.Function, node ast.Node, arguments []
 	return v.error(node, "no matching overload for %v", f.Name)
 }
 
-// 为什么未知类型不会报错？
+// 为什么未知类型 unknown 不会报错？
 //
 // 1. “未知类型” 是编译 / 解析过程中的临时状态
 //	在编译器或静态分析工具的工作流程中，类型检查通常是多轮次、渐进式的：
@@ -1517,15 +1517,28 @@ func (v *checker) checkArguments(
 	return fn.Out(0), nil
 }
 
+// 遍历语法树（AST）将整数节点（IntegerNode）替换为浮点数节点（FloatNode）。
+//
+// 只处理了三种类型节点：整数节点、一元运算节点和特定运算符的二元运算节点，对于其他类型节点不做任何处理；
+// 注意，转换是不可逆的，语法树中原始整数节点会被永久替换为浮点节点。
 func traverseAndReplaceIntegerNodesWithFloatNodes(node *ast.Node, newNature Nature) {
 	switch (*node).(type) {
 	case *ast.IntegerNode:
+		// 如果是整数节点：
+		// 	- 先取出整数值，转成 float64，新建一个 FloatNode。
+		// 	- 再用 *node = ... 覆盖原来的节点（完成替换）。
+		// 	- 最后给新建的 FloatNode 设置类型（来自 newNature.Type）。
 		*node = &ast.FloatNode{Value: float64((*node).(*ast.IntegerNode).Value)}
 		(*node).SetType(newNature.Type)
 	case *ast.UnaryNode:
+		// 如果是 一元运算节点（如 -x）：
+		//	- 递归进入 UnaryNode.Node（它的子节点），继续替换。
 		unaryNode := (*node).(*ast.UnaryNode)
 		traverseAndReplaceIntegerNodesWithFloatNodes(&unaryNode.Node, newNature)
 	case *ast.BinaryNode:
+		// 如果是二元运算节点（如 x+y、x*y）：
+		//	- 对 + - * 这几种运算做处理（可能因为 / 的语义在整数和浮点数里不一样，需要特殊对待）。
+		//	- 递归进入左右子节点，继续替换。
 		binaryNode := (*node).(*ast.BinaryNode)
 		switch binaryNode.Operator {
 		case "+", "-", "*":
@@ -1535,16 +1548,18 @@ func traverseAndReplaceIntegerNodesWithFloatNodes(node *ast.Node, newNature Natu
 	}
 }
 
+// 遍历 AST，它不把 IntegerNode 替换成 FloatNode，而是对 IntegerNode / UnaryNode / BinaryNode 做类型标记更新。
 func traverseAndReplaceIntegerNodesWithIntegerNodes(node *ast.Node, newNature Nature) {
 	switch (*node).(type) {
-	case *ast.IntegerNode:
+	case *ast.IntegerNode: // 如果是整数节点，直接更新它的类型为对应整数反射类型。
 		(*node).SetType(newNature.Type)
-	case *ast.UnaryNode:
+	case *ast.UnaryNode: // 如果是一元运算节点（如 -x、+x）：先把它本身的 Type 更新为对应整数反射类型；然后递归进入它的子节点，继续更新类型。
 		(*node).SetType(newNature.Type)
 		unaryNode := (*node).(*ast.UnaryNode)
 		traverseAndReplaceIntegerNodesWithIntegerNodes(&unaryNode.Node, newNature)
-	case *ast.BinaryNode:
+	case *ast.BinaryNode: //
 		// TODO: Binary node return type is dependent on the type of the operands. We can't just change the type of the node.
+		// TODO: 二元节点的返回类型依赖于操作数类型，不能简单的直接设置，而是通过修改其操作数类型间接实现
 		binaryNode := (*node).(*ast.BinaryNode)
 		switch binaryNode.Operator {
 		case "+", "-", "*":
@@ -1554,25 +1569,177 @@ func traverseAndReplaceIntegerNodesWithIntegerNodes(node *ast.Node, newNature Na
 	}
 }
 
+// PredicateNode 分析 AST 中的谓词节点，确定并返回封装其类型信息的 Nature 对象。
+//
+// 示例1：简单的比较谓词
+//
+// 有谓词表达式：
+// 	x -> x > 100
+//
+// 在 AST 中，这个表达式被表示为一个 PredicateNode ，其中包含一个子节点（node.Node）表示 `x > 100` 这个比较表达式：
+//	PredicateNode( BinaryNode(IdentifierNode("x"), ">", IntegerNode(100)) )
+//
+// 处理过程：
+//	- v.visit(node.Node) 访问 x > 5，返回 bool 类型 Nature{Type: reflect.TypeOf(bool{})} ，因为比较表达式返回布尔值；
+//	- 由于 nt 既不是未知类型也不是空类型，所以 out 切片会被添加 bool 类型：out = []reflect.Type{bool} ；
+//	- 最后返回的 Nature ：
+//		Nature{
+//		 	Type: reflect.FuncOf([]reflect.Type{anyType}, []reflect.Type{boolType}, false), // 即 func(interface{}) bool
+//		 	PredicateOut: &Nature{Type: boolType} // bool 类型
+//		}
+// 结果：
+//	- 这个谓词被识别为接受任意参数返回布尔值的函数
+//
+//
+// 示例2：类型未知的谓词
+//
+//	原始表达式：x => someUnknownFunction(x)
+//  AST结构：PredicateNode( CallNode("someUnknownFunction", IdentifierNode("x")) )
+//
+//	处理过程：
+//		- v.visit(node.Node) 访问函数调用，返回未知类型
+//		- nt = 未知类型
+//		- out = []reflect.Type{anyType} （因为 isUnknown(nt)）
+//
+//	返回的 Nature:
+//		- Type: func(interface{}) interface{}
+//		- PredicateOut: 指向未知类型的指针
+//
+//	结果：保守地返回最通用的函数类型
+//
+//
+// 示例3：返回nil的谓词
+//
+//	原始表达式：x => nil
+//	AST结构：PredicateNode( NilNode() )
+//	处理过程：
+//		- v.visit(node.Node) 访问nil节点，返回nil类型
+//		- nt = nil类型
+//		- out = []reflect.Type{} （空数组，因为 isNil(nt)）
+//	返回的 Nature:
+//		- Type: func(interface{}) （无返回值）
+//		- PredicateOut: 指向 nil 类型的指针
+//	结果：创建了一个没有返回值的函数类型
+//
+// 示例4：复杂表达式谓词
+//
+//	原始表达式：person => person.age > 18 && person.name != ""
+//	AST结构：PredicateNode( BinaryNode(&&, BinaryNode(>, FieldNode, IntNode), BinaryNode(!=, FieldNode, StringNode)) )
+//	处理过程：
+//		- v.visit(node.Node) 访问整个逻辑表达式，返回 bool 类型
+//		- nt = bool 类型
+//		- out = []reflect.Type{bool}
+//	返回的 Nature:
+//		- Type: func(interface{}) bool
+//		- PredicateOut: 指向 bool 类型的指针
+
 func (v *checker) PredicateNode(node *ast.PredicateNode) Nature {
+	// 获取子节点的类型信息
 	nt := v.visit(node.Node)
+	// 存储谓词函数的返回类型列表
 	var out []reflect.Type
+	// 据 nt 的情况决定函数的返回类型：
+	//	- 如果 nt 未知 → 结果是 anyType（万能类型，等价于 interface{}）。
+	//	- 如果 nt 非 nil → 结果就是 nt.Type。
+	//	- 如果 nt 是 nil → 那就不往 out 里加东西。
 	if isUnknown(nt) {
 		out = append(out, anyType)
 	} else if !isNil(nt) {
 		out = append(out, nt.Type)
 	}
+
+	// reflect.FuncOf 用于创建函数类型，参数分别为：输入参数类型切片、返回值类型切片、是否为可变参数
+	// reflect.FuncOf([]reflect.Type{anyType}, out, false) 表示：
+	//	- 参数：1 个 anyType 类型的参数
+	//	- 返回值：根据 out 数组确定，对于谓词函数来说只有 0 或 1 个返回值。
+	//	- 可变参数：false
+	// 即：
+	//	- func(anyType) out[0]
+
 	return Nature{
 		Type:         reflect.FuncOf([]reflect.Type{anyType}, out, false),
 		PredicateOut: &nt,
 	}
 }
 
+// 示例 1：合法的数组元素访问（无名称指针）
+//
+//	假设我们有这样的谓词表达式：[1,2,3,4] -> # > 2（意思是 "从数组中筛选出大于 2 的元素"）
+//
+//	在这个场景中：
+//		PointerNode 对应的是表达式中的 #（无名称指针，代表数组当前元素）
+//	处理过程：
+//		检查到 v.predicateScopes 不为空（在谓词内部），获取当前作用域 scope
+//		node.Name 为空，进入无名称指针处理逻辑
+//		scope.collection 是 []int（整数切片类型）
+//		检查到 scope.collection.Kind() 是 reflect.Slice
+//		返回 scope.collection.Elem() ，即 int 类型（切片的元素类型）
+//	结果：
+//		类型检查通过，# 被判定为 int 类型，与2（整数）的比较合法
+//
+// 示例 2：合法的变量访问（有名称指针）
+//	假设我们有这样的谓词表达式：users -> #age > 18（意思是 "从用户集合中筛选出年龄大于 18 的用户"）
+//
+//	在这个场景中：
+//		PointerNode 对应的是表达式中的 #age（有名称指针，访问用户的 age 属性）
+//	处理过程：
+//		确认在谓词内部，获取当前作用域 scope
+//		node.Name 为 "age"，进入有名称指针处理逻辑
+//		scope.vars 中存在 age: int（假设用户的年龄字段是整数类型）
+//		从 scope.vars 中找到 "age" 对应的类型 int 并返回
+//	结果：
+//		类型检查通过，#age 被判定为 int 类型，与 18 的比较合法
+//
+// 示例 3：错误场景 1 - 指针在谓词外使用
+//
+//	假设我们有这样的表达式：#x + 5（不在任何谓词内部）
+//
+//	处理过程：
+//		检查到 v.predicateScopes 为空（没有谓词作用域）
+//		直接返回错误：cannot use pointer accessor outside predicate
+//	结果：
+//		类型检查失败，提示指针不能在谓词外部使用
+//
+// 示例 4：错误场景 2 - 对非数组 / 切片使用无名称指针
+//
+//	假设我们有这样的谓词表达式：{"name": "Alice", "age": 20} -> # > 18（对结构体使用#）
+//
+//	处理过程：
+//		在谓词内部，获取作用域 scope
+//		node.Name 为空，处理无名称指针
+//		scope.collection 是结构体类型（非数组 / 切片）
+//		检查到 scope.collection.Kind() 不是 reflect.Array 或 reflect.Slice
+//	返回错误：
+//		cannot use struct as array
+//	结果：
+//		类型检查失败，提示不能对结构体使用元素访问指针#
+//
+// 示例 5：错误场景 3 - 访问未定义的指针变量
+//	假设我们有这样的谓词表达式：users -> #salary > 5000（假设users集合中没有salary字段）
+//
+//	处理过程：
+//		在谓词内部，获取作用域scope
+//		node.Name 为 "salary"，查找 scope.vars
+//		scope.vars 中没有 "salary" 的定义（ok 为 false）
+//	返回错误：
+//		unknown pointer #salary
+//	结果：
+//		类型检查失败，提示指针变量未定义
+
 func (v *checker) PointerNode(node *ast.PointerNode) Nature {
+	// 不能在谓词作用域之外使用指针，换句话说，PointerNode 只能在 PredicateNode 的上下文里用。
 	if len(v.predicateScopes) == 0 {
 		return v.error(node, "cannot use pointer accessor outside predicate")
 	}
+	// 取当前作用域（栈顶作用域），每个作用域 scope 里一般会保存：
+	//	- collection：谓词所作用的集合类型（如 []int、[]User）。
+	//	- vars：当前谓词可访问的变量信息（变量名 → 变量类型）。
 	scope := v.predicateScopes[len(v.predicateScopes)-1]
+
+	// 如果 PointerNode 没有名字（Name == ""），表示要取集合元素本身。
+	//	- 若集合类型未知 → 返回 unknown。
+	//	- 若集合是 数组/切片 类型 → 返回元素类型（Elem()）。
+	//	- 若集合不是数组 / 切片（如结构体、map），返回错误。
 	if node.Name == "" {
 		if isUnknown(scope.collection) {
 			return unknown
@@ -1583,6 +1750,8 @@ func (v *checker) PointerNode(node *ast.PointerNode) Nature {
 		}
 		return v.error(node, "cannot use %v as array", scope)
 	}
+	// 如果 PointerNode 有名字（例如 #id），表示是变量访问，要去 scope.vars 里查找。
+	// 如果找到了，就返回这个变量对应的类型，否则报错 "未知指针" 。
 	if scope.vars != nil {
 		if t, ok := scope.vars[node.Name]; ok {
 			return t
