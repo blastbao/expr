@@ -6,6 +6,29 @@ import (
 	. "github.com/expr-lang/expr/ast"
 )
 
+// inRange 把 x in (m .. n) 改写成：(x >= m) and (x <= n)
+//
+// 优化示例
+//
+//	优化前：age in 18..65
+//	优化后：age >= 18 and age <= 65
+//
+// 对应的 AST 结构变化：
+//
+//	优化前：
+//	   in
+//	  / \
+//	age  ..
+//		/ \
+//	   18  65
+//
+//	优化后：
+//		 and
+//		/   \
+//	  >=     <=
+//	 / \    / \
+//	age 18 age 65
+
 type inRange struct{}
 
 func (*inRange) Visit(node *Node) {
