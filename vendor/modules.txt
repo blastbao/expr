@@ -1,7 +1,0 @@
-# git.garena.com/shopee/ai-engine-platform/rcmdplt/graph-engine v0.0.7
-## explicit; go 1.19
-git.garena.com/shopee/ai-engine-platform/rcmdplt/graph-engine/gcontext
-# github.com/valyala/fastjson v1.6.4
-## explicit; go 1.12
-github.com/valyala/fastjson
-github.com/valyala/fastjson/fastfloat
