@@ -1163,6 +1163,12 @@ func (v *checker) end() {
 	v.predicateScopes = v.predicateScopes[:len(v.predicateScopes)-1]
 }
 
+// checkBuiltinGet 检查 get() 内置函数调用是否合法。
+//
+// 在 expr 里，get(collection, key) 的语义和 Go 类似：
+//   - 如果 collection 是数组/切片：key 必须是整数索引
+//   - 如果 collection 是 map：key 必须是可赋值给 map 的 key 类型
+//   - 如果 collection 是 $env，第二个参数是字符串，则尝试从环境里取值
 func (v *checker) checkBuiltinGet(node *ast.BuiltinNode) Nature {
 	if len(node.Arguments) != 2 {
 		return v.error(node, "invalid number of arguments (expected 2, got %d)", len(node.Arguments))
@@ -1214,7 +1220,7 @@ func (v *checker) checkBuiltinGet(node *ast.BuiltinNode) Nature {
 //	       if args[0].Kind() != reflect.Slice && args[0].Kind() != reflect.String {
 //	           return nil, fmt.Errorf("len argument must be slice or string")
 //	       }
-//	       return reflect.TypeOf(0), nil // 返回 int
+//	       return reflect.TypeOf(0), nil // 返回值为 int 类型
 //	   },
 //	}
 //
@@ -1393,14 +1399,14 @@ func (v *checker) checkFunction(f *builtin.Function, node ast.Node, arguments []
 //		call(v)
 //	v 的实际类型可能在运行时才能确定，静态阶段标记为 unknown，用于类型推迟检查。
 
-// 验证函数调用的参数是否与函数定义匹配，包括：
+// 检查调用某个函数时，实参列表 arguments 是否能正确匹配函数签名 fn，并在必要时做类型转换或报错。
 //   - 参数数量是否正确（过多 / 过少都会报错）
 //   - 参数类型是否与函数参数类型兼容（在需要时进行类型转换）
 //   - 处理可变参数（variadic）和方法接收器（method receiver）的特殊情况
 func (v *checker) checkArguments(
 	name string, // 函数名
 	fn Nature, // 函数类型信息
-	arguments []ast.Node, // 调用时传入的参数 AST 节点列表
+	arguments []ast.Node, // 实参 AST 列表
 	node ast.Node, // 函数调用的 AST 节点
 ) (
 	Nature, // 函数返回值类型
@@ -1444,7 +1450,6 @@ func (v *checker) checkArguments(
 	// 检查参数个数：
 	//  - 可变参数函数：参数个数 ≥ 固定参数个数。
 	//  - 普通函数：参数个数必须 == fnNumIn。
-	// 如果不满足，生成 file.Error。
 	var err *file.Error
 	if fn.IsVariadic() { // 可变参数函数
 		if len(arguments) < fnNumIn-1 { // 至少需要 n-1 个参数
@@ -1483,17 +1488,17 @@ func (v *checker) checkArguments(
 	//  - 可变参数处理：取底层元素类型（Go 中 func(xs ...int) 对应 []int）。
 	//  - 方法函数偏移：跳过 receiver。
 	for i, arg := range arguments {
-		// 获取参数的类型信息
+		// 获取实参类型
 		argNature := v.visit(arg)
 
-		// 确定函数期望的参数类型（处理可变参数的特殊情况）
+		// 获取函数期望的参数类型（处理可变参数的特殊情况）
 		var in Nature
 		if fn.IsVariadic() && i >= fnNumIn-1 {
 			// For variadic arguments fn(xs ...int), go replaces type of xs (int) with ([]int).
 			// As we compare arguments one by one, we need underling type.
-			in = fn.In(fn.NumIn() - 1).Elem() // 可变参数的实际类型是切片元素类型（如 ...int 实际接收 int 类型）
+			in = fn.In(fn.NumIn() - 1).Elem() // 可变参数的类型（如 ...int 实际接收 int 类型）
 		} else {
-			in = fn.In(i + fnInOffset) // 获取对应位置的参数类型
+			in = fn.In(i + fnInOffset) // 对应位置的参数类型
 		}
 
 		// 情况1：浮点数参数接收整数（自动转换）

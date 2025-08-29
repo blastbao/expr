@@ -147,9 +147,9 @@ func Function(name string, fn func(params ...any) (any, error), types ...any) Op
 			ts[i] = t
 		}
 		c.Functions[name] = &builtin.Function{
-			Name:  name,
-			Func:  fn,
-			Types: ts,
+			Name:  name, // 函数名
+			Func:  fn,   // 函数通用类型
+			Types: ts,   // 函数重载类型
 		}
 	}
 }

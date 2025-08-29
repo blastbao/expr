@@ -1113,6 +1113,24 @@ func (c *compiler) SliceNode(node *ast.SliceNode) {
 //	out := method.Call(args)
 //	fmt.Println(out[0]) // => Hello, xxx
 
+// 在 expr 的执行引擎里，调用函数有两种主要形式：
+//
+//	OpCall (通用调用)
+//
+//		对应 func(args ...any) (any, error) 这种通用包装。
+//		依赖反射，把 []any 转换成真实函数的参数类型，再调用。
+//		灵活，但速度较慢。
+//
+//	OpCallTyped (已知签名的调用)
+//
+//		在编译阶段，如果 expr 已经通过 Types 校验，明确知道函数的精确类型签名（比如 func(int) bool），
+//		那么 expr 会生成一个 特定的调用节点，即 OpCallTyped。
+//		在执行时，就直接把 Value 当作强类型函数调用，而不是用反射。
+//		这样可以避免 reflect.Value.Call 的开销，性能更高。
+//
+//		OpCallTyped 通过编译期类型校验，在生成执行树的时候就绑定好函数的具体签名，
+//		运行时就能用强类型的 Go 函数调用，而不是每次都走 reflect.Call。
+
 func (c *compiler) CallNode(node *ast.CallNode) {
 	fn := node.Callee.Type()
 	if fn.Kind() == reflect.Func {
@@ -1162,7 +1180,7 @@ func (c *compiler) CallNode(node *ast.CallNode) {
 		}
 	}
 
-	// 若调用的是内置函数（如 print），直接 emitFunction 。
+	// 若调用的是用户自定义函数，直接 emitFunction 。
 	if ident, ok := node.Callee.(*ast.IdentifierNode); ok {
 		if c.config != nil {
 			if fn, ok := c.config.Functions[ident.Value]; ok {
@@ -1479,15 +1497,26 @@ func (c *compiler) BuiltinNode(node *ast.BuiltinNode) {
 	}
 
 	if id, ok := builtin.Index[node.Name]; ok {
+
+		// 执行过程：
+		//	- 先递归编译每个参数（如 sum(a, b) 中的 a 和 b），生成参数的字节码。
+		//	- 若参数是指针类型（reflect.Ptr）或类型未知，需要判断是否解引用：
+		//		- 若无自定义 Deref 规则，默认解引用（内置函数通常期望直接操作值而非指针）。
+		//		- 若有自定义 Deref 规则（如之前说的 IsPositive 函数），则按规则决定是否解引用。
+		//	- c.emit(OpDeref) 生成解引用指令，在运行时会将栈顶的指针值转换为实际值。
+
 		f := builtin.Builtins[id]
 		for i, arg := range node.Arguments {
 			c.compile(arg)
 			argType := arg.Type()
+			// 如果参数是指针或 Unknown （在编译期没法确认）类型，需要考虑是否要对它做 Deref（解引用）。
 			if argType.Kind() == reflect.Ptr || arg.Nature().IsUnknown() {
+				// 默认情况下，所有 builtin 参数都要解引用。
 				if f.Deref == nil {
 					// By default, builtins expect arguments to be dereferenced.
 					c.emit(OpDeref)
 				} else {
+					// 有些内置函数提供了 f.Deref 函数，可以按参数索引和类型来判断是否需要解引用。
 					if f.Deref(i, argType) {
 						c.emit(OpDeref)
 					}
@@ -1496,13 +1525,17 @@ func (c *compiler) BuiltinNode(node *ast.BuiltinNode) {
 		}
 
 		if f.Fast != nil {
-			c.emit(OpCallBuiltin1, id)
+			// 1. 优先使用 Fast 快速调用（单参数、无错误处理的高效版本）
+			c.emit(OpCallBuiltin1, id) // 生成调用内置函数的快速指令，传入函数 ID
 		} else if f.Safe != nil {
-			c.emit(OpPush, c.addConstant(f.Safe))
-			c.emit(OpCallSafe, len(node.Arguments))
+			// 2. 其次使用 Safe 安全调用（带状态返回的版本）
+			c.emit(OpPush, c.addConstant(f.Safe))   // 将 Safe 函数入栈
+			c.emit(OpCallSafe, len(node.Arguments)) // 生成安全调用指令，传入参数数量
 		} else if f.Func != nil {
-			c.emitFunction(f, len(node.Arguments))
+			// 3. 最后使用普通 Func 调用（通用版本）
+			c.emitFunction(f, len(node.Arguments)) // 生成普通调用指令
 		}
+
 		return
 	}
 

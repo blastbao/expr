@@ -22,6 +22,37 @@ import (
 	"github.com/expr-lang/expr/test/mock"
 )
 
+func fib1(ctx context.Context, n int) int {
+	fmt.Println("xxxxx fib", n)
+	if n <= 1 {
+		return n
+	}
+	return fib(n-1) + fib(n-2)
+}
+
+func TestFib1(t *testing.T) {
+	code := `fib1(ctx, 5)`
+	env := map[string]any{
+		"ctx":  context.Background(),
+		"fib1": fib1,
+	}
+	options := []expr.Option{
+		expr.Env(env),
+	}
+
+	program, err := expr.Compile(code, options...)
+	if err != nil {
+		fmt.Printf("%v", err)
+		return
+	}
+	output, err := expr.Run(program, env)
+	if err != nil {
+		fmt.Printf("%v", err)
+		return
+	}
+	fmt.Printf("%v\n", output)
+}
+
 func ExampleEval() {
 	output, err := expr.Eval("greet + name", map[string]any{
 		"greet": "Hello, ",

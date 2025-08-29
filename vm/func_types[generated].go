@@ -3,6 +3,7 @@
 package vm
 
 import (
+	"context"
 	"fmt"
 	"time"
 )
@@ -98,6 +99,7 @@ var FuncTypes = []any{
 	88: new(func(uint64) float64),
 	89: new(func(uint64) int64),
 	90: new(func(uint8) uint8),
+	91: new(func(context.Context, int) int),
 }
 
 func (vm *VM) call(fn any, kind int) any {
@@ -364,6 +366,10 @@ func (vm *VM) call(fn any, kind int) any {
 	case 90:
 		arg1 := vm.pop().(uint8)
 		return fn.(func(uint8) uint8)(arg1)
+	case 91:
+		arg2 := vm.pop().(int)
+		arg1 := vm.pop().(context.Context)
+		return fn.(func(context.Context, int) int)(arg1, arg2)
 
 	}
 	panic(fmt.Sprintf("unknown function kind (%v)", kind))

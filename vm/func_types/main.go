@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"go/format"
 	"reflect"
@@ -103,6 +104,7 @@ var types = []any{
 	new(func(uint64) float64),
 	new(func(uint64) int64),
 	new(func(uint8) byte),
+	new(func(context.Context, int) int),
 }
 
 func main() {

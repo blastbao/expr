@@ -26,17 +26,18 @@ func kind(t reflect.Type) reflect.Kind {
 	return t.Kind()
 }
 
+// 接收任意数量的参数，将它们转换为反射类型（reflect.Type）并验证这些类型是否为函数，最终返回一个包含这些函数反射类型的切片。
 func types(types ...any) []reflect.Type {
 	ts := make([]reflect.Type, len(types))
 	for i, t := range types {
-		t := reflect.TypeOf(t)
-		if t.Kind() == reflect.Ptr {
+		t := reflect.TypeOf(t)       // 获取参数的反射类型
+		if t.Kind() == reflect.Ptr { // 如果类型是指针，则通过 t.Elem() 获取指针指向的实际类型
 			t = t.Elem()
 		}
-		if t.Kind() != reflect.Func {
+		if t.Kind() != reflect.Func { // 检查类型是否为函数（reflect.Func）
 			panic("not a function")
 		}
-		ts[i] = t
+		ts[i] = t // 将的函数类型存入切片 ts 中
 	}
 	return ts
 }
