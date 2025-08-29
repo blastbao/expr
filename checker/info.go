@@ -1,6 +1,7 @@
 package checker
 
 import (
+	"fmt"
 	"reflect"
 
 	"github.com/expr-lang/expr/ast"
@@ -201,6 +202,10 @@ funcTypes:
 			continue
 		}
 		typed := reflect.ValueOf(vm.FuncTypes[i]).Elem().Type()
+		//fmt.Printf("%v\n", typed.Name())
+		//fmt.Printf("%v\n", typed.Kind())
+		//fmt.Printf("%v\n", typed.String())
+
 		if typed.Kind() != reflect.Func {
 			continue
 		}
@@ -218,12 +223,80 @@ funcTypes:
 			continue
 		}
 		for j := 0; j < typed.NumIn(); j++ {
+			fmt.Printf("%v\n", typed.In(j).String())
 			if typed.In(j) != fn.In(j+fnInOffset) {
 				continue funcTypes
 			}
 		}
 		return i, true
 	}
+	return 0, false
+}
+
+func TypedCustomFuncIndex(fn reflect.Type, method bool) (int, bool) {
+	if fn == nil {
+		return 0, false
+	}
+	if fn.Kind() != reflect.Func {
+		return 0, false
+	}
+	// OnCallTyped doesn't work for functions with variadic arguments.
+	if fn.IsVariadic() {
+		return 0, false
+	}
+	// OnCallTyped doesn't work named function, like `type MyFunc func() int`.
+	if fn.PkgPath() != "" { // If PkgPath() is not empty, it means that function is named.
+		return 0, false
+	}
+
+	fnNumIn := fn.NumIn()
+	fnInOffset := 0
+	if method {
+		fnNumIn--
+		fnInOffset = 1
+	}
+
+funcTypes:
+	for i := range vm.CustomFuncTypes {
+		if i == 0 {
+			continue
+		}
+
+		typed := reflect.ValueOf(vm.CustomFuncTypes[i]).Elem().Type()
+
+		//fmt.Printf("%v\n", typed.Name())
+		//fmt.Printf("%v\n", typed.Kind())
+		//fmt.Printf("%v\n", typed.String())
+
+		if typed.Kind() != reflect.Func {
+			continue
+		}
+
+		// 返回值数量和类型完全一致
+		if typed.NumOut() != fn.NumOut() {
+			continue
+		}
+
+		for j := 0; j < typed.NumOut(); j++ {
+			if typed.Out(j) != fn.Out(j) {
+				continue funcTypes
+			}
+		}
+
+		// 参数数量和类型完全一致
+		if typed.NumIn() != fnNumIn {
+			continue
+		}
+
+		for j := 0; j < typed.NumIn(); j++ {
+			if typed.In(j) != fn.In(j+fnInOffset) {
+				continue funcTypes
+			}
+		}
+
+		return i, true
+	}
+
 	return 0, false
 }
 

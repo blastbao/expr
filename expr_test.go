@@ -20,18 +20,19 @@ import (
 	"github.com/expr-lang/expr/ast"
 	"github.com/expr-lang/expr/file"
 	"github.com/expr-lang/expr/test/mock"
+
+	"git.garena.com/shopee/ai-engine-platform/rcmdplt/graph-engine/gcontext"
 )
 
-func fib1(ctx context.Context, n int) int {
-	fmt.Println("xxxxx fib", n)
+func fib1(ctx *gcontext.GraphEngineCtx, n int) (int, error) {
 	if n <= 1 {
-		return n
+		return n, nil
 	}
-	return fib(n-1) + fib(n-2)
+	return fib(n-1) + fib(n-2), nil
 }
 
 func TestFib1(t *testing.T) {
-	code := `fib1(ctx, 5)`
+	code := `fib1(nil, 5)`
 	env := map[string]any{
 		"ctx":  context.Background(),
 		"fib1": fib1,
@@ -51,6 +52,32 @@ func TestFib1(t *testing.T) {
 		return
 	}
 	fmt.Printf("%v\n", output)
+}
+
+func BenchmarkFib1(b *testing.B) {
+	// 初始化环境（避免在循环中重复创建）
+	env := map[string]any{
+		"ctx":  context.Background(),
+		"fib1": fib1,
+	}
+	code := `fib1(nil, 5)` // 测试表达式
+
+	// 预编译（避免计入循环时间）
+	program, err := expr.Compile(code, expr.Env(env))
+	if err != nil {
+		b.Fatalf("Compile error: %v", err)
+	}
+
+	// 重置计时器，排除初始化影响
+	b.ResetTimer()
+
+	// 执行基准测试
+	for i := 0; i < b.N; i++ {
+		_, err := expr.Run(program, env)
+		if err != nil {
+			b.Fatalf("Run error: %v", err)
+		}
+	}
 }
 
 func ExampleEval() {

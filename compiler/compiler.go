@@ -1199,7 +1199,10 @@ func (c *compiler) CallNode(node *ast.CallNode) {
 	//	- OpCall：通用反射调用。
 	if c.config != nil {
 		isMethod, _, _ := checker.MethodIndex(c.config.Env, node.Callee)
-		if index, ok := checker.TypedFuncIndex(node.Callee.Type(), isMethod); ok {
+		if index1, ok1 := checker.TypedCustomFuncIndex(node.Callee.Type(), isMethod); ok1 {
+			c.emit(OpCallTypedCustom, index1)
+			return
+		} else if index, ok := checker.TypedFuncIndex(node.Callee.Type(), isMethod); ok {
 			c.emit(OpCallTyped, index)
 			return
 		} else if checker.IsFastFunc(node.Callee.Type(), isMethod) {

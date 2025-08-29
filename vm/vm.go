@@ -388,6 +388,12 @@ func (vm *VM) Run(program *Program, env any) (_ any, err error) {
 			vm.push(out)
 		case OpCallTyped:
 			vm.push(vm.call(vm.pop(), arg))
+		case OpCallTypedCustom:
+			out, err := vm.callCustomFuncType(vm.pop(), arg)
+			if err != nil {
+				panic(err)
+			}
+			vm.push(out)
 		case OpCallBuiltin1:
 			vm.push(builtin.Builtins[arg].Fast(vm.pop()))
 		case OpArray:

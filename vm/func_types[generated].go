@@ -6,6 +6,9 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+
+	"git.garena.com/shopee/ai-engine-platform/rcmdplt/graph-engine/gcontext"
 )
 
 var FuncTypes = []any{
@@ -370,7 +373,10 @@ func (vm *VM) call(fn any, kind int) any {
 		arg2 := vm.pop().(int)
 		arg1 := vm.pop().(context.Context)
 		return fn.(func(context.Context, int) int)(arg1, arg2)
-
+	case 92:
+		arg2 := vm.pop().(int)
+		arg1 := vm.pop().(*gcontext.IGraphEngineCtx)
+		return fn.(func(*gcontext.IGraphEngineCtx, int) int)(arg1, arg2)
 	}
 	panic(fmt.Sprintf("unknown function kind (%v)", kind))
 }

@@ -299,6 +299,9 @@ func (program *Program) DisassembleWriter(w io.Writer) {
 		case OpCallTyped:
 			signature := reflect.TypeOf(FuncTypes[arg]).Elem().String()
 			_, _ = fmt.Fprintf(w, "%v\t%v\t<%v>\t%v\n", pp, "OpCallTyped", arg, signature)
+		case OpCallTypedCustom:
+			signature := reflect.TypeOf(FuncTypes[arg]).Elem().String()
+			_, _ = fmt.Fprintf(w, "%v\t%v\t<%v>\t%v\n", pp, "OpCallTypedCustom", arg, signature)
 
 		case OpCallBuiltin1:
 			builtinArg("OpCallBuiltin1")

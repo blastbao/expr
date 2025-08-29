@@ -62,6 +62,7 @@ const (
 	OpCallFast
 	OpCallSafe
 	OpCallTyped
+	OpCallTypedCustom
 	OpCallBuiltin1
 	OpArray
 	OpMap
@@ -205,6 +206,8 @@ func (op Opcode) String() string {
 		return "OpCallSafe"
 	case OpCallTyped:
 		return "OpCallTyped"
+	case OpCallTypedCustom:
+		return "OpCallTypedCustom"
 	case OpCallBuiltin1:
 		return "OpCallBuiltin1"
 	case OpArray:
