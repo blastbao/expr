@@ -370,5 +370,6 @@ func (vm *VM) call(fn any, kind int) any {
 		arg2 := vm.pop().(int)
 		arg1 := vm.pop().(context.Context)
 		return fn.(func(context.Context, int) int)(arg1, arg2)
+	}
 	panic(fmt.Sprintf("unknown function kind (%v)", kind))
 }
